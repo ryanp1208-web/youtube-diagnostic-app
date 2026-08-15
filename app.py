@@ -3,7 +3,7 @@ import re
 from googleapiclient.discovery import build
 
 # Replace with a free YouTube Data API key from Google Cloud Console
-API_KEY = "YOUR_YOUTUBE_API_KEY"
+API_KEY = "AIzaSyBvt18YFvwOzATuC_-NlsDfhzixnKOQFjk"
 
 st.title("YouTube Video Auto-Diagnostic")
 
@@ -17,7 +17,7 @@ def extract_video_id(url):
 
 if video_url:
     video_id = extract_video_id(video_url)
-    if video_id and API_KEY != "YOUR_YOUTUBE_API_KEY":
+    if video_id:
         youtube = build('youtube', 'v3', developerKey=API_KEY)
         
         # Fetch public video stats
