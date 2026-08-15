@@ -1,109 +1,293 @@
-import streamlit as st
-import re
-from datetime import datetime, timezone
-from googleapiclient.discovery import build
+# ==========================================
+# YOUTUBE VIDEO DIAGNOSTIC ENGINE
+# ==========================================
 
-API_KEY = "AIzaSyCrH_EOswa6DgOh2taq0aGo_gsUtdpT3TE"
+def diagnose_video(ctr, impressions, retention, views, likes):
+    """
+    Diagnose YouTube video performance.
 
-st.title("YouTube Video & Thumbnail Diagnostic")
+    Inputs:
+        ctr         = CTR as a percentage (example: 8.5)
+        impressions = total impressions
+        retention   = average percentage viewed (example: 42.5)
+        views       = total views
+        likes       = total likes
 
-video_url = st.text_input("Paste YouTube Video URL:")
+    Returns:
+        score       = 0-100
+        overall     = overall performance rating
+        diagnostics = list of individual findings
+        priority    = most important thing to improve
+    """
 
-col_input1, col_input2, col_input3 = st.columns(3)
-with col_input1:
-    user_ctr = st.number_input("Enter CTR (%):", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
-with col_input2:
-    user_impressions = st.number_input("Enter Impressions:", min_value=0, value=0, step=100)
-with col_input3:
-    user_retention = st.number_input("Enter Retention (%):", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
+    score = 100
+    diagnostics = []
 
-def extract_video_id(url):
-    regex = r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})"
-    match = re.search(regex, url)
-    return match.group(1) if match else None
+    # ==========================================
+    # 1. CTR / THUMBNAIL + TITLE
+    # ==========================================
 
-if video_url:
-    video_id = extract_video_id(video_url)
-    if video_id:
-        youtube = build('youtube', 'v3', developerKey=API_KEY)
-        request = youtube.videos().list(part="snippet,statistics", id=video_id)
-        response = request.execute()
-        
-        if response['items']:
-            item = response['items'][0]
-            title = item['snippet']['title']
-            channel_title = item['snippet']['channelTitle']
-            channel_id = item['snippet']['channelId']
-            thumbnail = item['snippet']['thumbnails']['high']['url']
-            published_at_str = item['snippet']['publishedAt']
-            views = int(item['statistics'].get('viewCount', 0))
-            likes = int(item['statistics'].get('likeCount', 0))
-            
-            # Additional fetch for channel subscriber count
-            channel_request = youtube.channels().list(part="statistics", id=channel_id)
-            channel_response = channel_request.execute()
-            sub_count = 0
-            if channel_response['items']:
-                sub_count = int(channel_response['items'][0]['statistics'].get('subscriberCount', 0))
+    if impressions < 2000:
+        # Small sample = don't overreact
+        if ctr >= 8:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "good",
+                "message": (
+                    f"CTR is {ctr:.1f}% with only {impressions:,} impressions. "
+                    "The early packaging signal is strong, but the sample is still small."
+                ),
+                "impact": 0
+            })
 
-       pub_date_str = published_at_str.replace('Z', '')[:10]
-            pub_date = datetime.fromisoformat(pub_date_str)
-            days_old = (datetime.now().date() - pub_date.date()).days
-            days_text = "Today" if days_old == 0 else f"{days_old} days ago"
-            days_old = (datetime.now(timezone.utc) - pub_date).days
-            days_text = "Today" if days_old == 0 else f"{days_old} days ago"
+        elif ctr >= 5:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "okay",
+                "message": (
+                    f"CTR is {ctr:.1f}%. The thumbnail/title combination is "
+                    "getting a reasonable number of clicks, but there is room to improve it."
+                ),
+                "impact": 8
+            })
+            score -= 8
 
-            st.subheader(f"Analyzing: {title}")
-            st.caption(f"Channel: **{channel_title}** ({sub_count:,} Subscribers)")
-            
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.image(thumbnail, use_container_width=True)
-            with col2:
-                st.metric("Total Views", f"{views:,}")
-                st.metric("Total Likes", f"{likes:,}")
-                st.metric("Published", days_text)
-                if user_ctr > 0:
-                    st.metric("Your CTR", f"{user_ctr}%")
-                if user_impressions > 0:
-                    st.metric("Impressions", f"{user_impressions:,}")
-                if user_retention > 0:
-                    st.metric("Your Retention", f"{user_retention}%")
-            
-            st.divider()
-            st.subheader("Diagnostic Feedback")
-            
-            if user_ctr > 0:
-                if user_impressions > 0 and user_impressions < 2000:
-                    target_high = 8.0
-                    target_low = 5.0
-                    st.info("ℹ️ **Small Audience Pool (<2k Impressions):** YouTube is showing this mostly to hyper-targeted viewers/subscribers. Your CTR expectation is higher.")
-                elif user_impressions >= 100000:
-                    target_high = 4.0
-                    target_low = 2.5
-                    st.info("ℹ️ **Broad Scale Push (100k+ Impressions):** YouTube has pushed this deep into Browse feeds. Lower CTR is expected and normal at this scale.")
-                else:
-                    target_high = 6.0
-                    target_low = 3.5
-                    st.info("ℹ️ **Moderate Scale Push:** Video is reaching a general audience pool.")
-
-                if user_ctr >= target_high:
-                    st.success(f"✅ **Strong Packaging!** Your CTR of {user_ctr}% is performing great for {channel_title} at this scale ({user_impressions:,} impressions).")
-                elif user_ctr >= target_low:
-                    st.warning(f"⚠️ **Average Packaging:** Your CTR ({user_ctr}%) is decent, but sharpening thumbnail text or bumping contrast could unlock more clicks.")
-                else:
-                    st.error(f"🚨 **Underperforming Thumbnail:** A {user_ctr}% CTR at {user_impressions:,} impressions means the thumbnail isn't grabbing attention.")
-                    st.write("**Fixes to test immediately:**")
-                    st.write("- **Focus:** Ensure 1 clear focal point (face/object) rather than multi-element scenes.")
-                    st.write("- **Text:** Limit thumbnail text to 2–3 words max (don't repeat the title verbatim).")
-                    st.write("- **Contrast:** Increase color saturation and subject framing so it stands out on mobile size.")
-            else:
-                st.info("💡 Enter your CTR and Impressions above for full packaging analysis.")
-
-            if user_retention > 0:
-                if user_retention < 40.0:
-                    st.error("🚨 **Low Retention (Under 40%):** Viewers drop off early. Trim intros and pay off the thumbnail promise faster.")
-                else:
-                    st.success("✅ **Solid Retention (Above 40%):** Viewers are staying engaged.")
         else:
-            st.error("Video not found. Please check the URL.")
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "bad",
+                "message": (
+                    f"CTR is only {ctr:.1f}% on {impressions:,} impressions. "
+                    "The thumbnail or title may not be generating enough curiosity."
+                ),
+                "impact": 20
+            })
+            score -= 20
+
+    elif impressions < 100000:
+
+        if ctr >= 7:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "good",
+                "message": (
+                    f"CTR is {ctr:.1f}% across {impressions:,} impressions. "
+                    "Packaging is performing strongly at this level of distribution."
+                ),
+                "impact": 0
+            })
+
+        elif ctr >= 4.5:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "okay",
+                "message": (
+                    f"CTR is {ctr:.1f}% across {impressions:,} impressions. "
+                    "Packaging is acceptable, but a stronger thumbnail/title could increase clicks."
+                ),
+                "impact": 10
+            })
+            score -= 10
+
+        else:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "bad",
+                "message": (
+                    f"CTR is {ctr:.1f}% despite {impressions:,} impressions. "
+                    "Packaging is likely limiting further growth."
+                ),
+                "impact": 20
+            })
+            score -= 20
+
+    else:
+        # Very large impression count
+        if ctr >= 5:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "good",
+                "message": (
+                    f"CTR is {ctr:.1f}% despite {impressions:,} impressions. "
+                    "That is a strong packaging signal at high distribution."
+                ),
+                "impact": 0
+            })
+
+        elif ctr >= 3:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "okay",
+                "message": (
+                    f"CTR is {ctr:.1f}% with {impressions:,} impressions. "
+                    "The video is reaching a broad audience, but packaging could be sharper."
+                ),
+                "impact": 10
+            })
+            score -= 10
+
+        else:
+            diagnostics.append({
+                "category": "Packaging",
+                "status": "bad",
+                "message": (
+                    f"CTR is only {ctr:.1f}% after {impressions:,} impressions. "
+                    "The thumbnail/title combination is probably the biggest weakness."
+                ),
+                "impact": 25
+            })
+            score -= 25
+
+    # ==========================================
+    # 2. RETENTION
+    # ==========================================
+
+    if retention >= 50:
+        diagnostics.append({
+            "category": "Retention",
+            "status": "good",
+            "message": (
+                f"Average percentage viewed is {retention:.1f}%. "
+                "Viewers are staying engaged."
+            ),
+            "impact": 0
+        })
+
+    elif retention >= 40:
+        diagnostics.append({
+            "category": "Retention",
+            "status": "okay",
+            "message": (
+                f"Average percentage viewed is {retention:.1f}%. "
+                "Retention is acceptable, but the opening and pacing could be improved."
+            ),
+            "impact": 10
+        })
+        score -= 10
+
+    elif retention >= 30:
+        diagnostics.append({
+            "category": "Retention",
+            "status": "bad",
+            "message": (
+                f"Average percentage viewed is only {retention:.1f}%. "
+                "A significant number of viewers are leaving before the video finishes."
+            ),
+            "impact": 20
+        })
+        score -= 20
+
+    else:
+        diagnostics.append({
+            "category": "Retention",
+            "status": "bad",
+            "message": (
+                f"Average percentage viewed is only {retention:.1f}%. "
+                "Retention is a major weakness. Focus on the first minute, pacing, "
+                "and removing unnecessary sections."
+            ),
+            "impact": 30
+        })
+        score -= 30
+
+    # ==========================================
+    # 3. LIKE ENGAGEMENT
+    # ==========================================
+
+    like_rate = 0
+
+    if views > 0:
+        like_rate = (likes / views) * 100
+
+        if like_rate >= 5:
+            diagnostics.append({
+                "category": "Engagement",
+                "status": "good",
+                "message": (
+                    f"Like rate is {like_rate:.2f}%. "
+                    "Viewer engagement is strong."
+                ),
+                "impact": 0
+            })
+
+        elif like_rate >= 2:
+            diagnostics.append({
+                "category": "Engagement",
+                "status": "okay",
+                "message": (
+                    f"Like rate is {like_rate:.2f}%. "
+                    "Engagement is reasonable."
+                ),
+                "impact": 3
+            })
+            score -= 3
+
+        else:
+            diagnostics.append({
+                "category": "Engagement",
+                "status": "bad",
+                "message": (
+                    f"Like rate is only {like_rate:.2f}%. "
+                    "The video may not be creating enough engagement."
+                ),
+                "impact": 8
+            })
+            score -= 8
+
+    # ==========================================
+    # 4. FIND THE BIGGEST PROBLEM
+    # ==========================================
+
+    biggest_problem = None
+    biggest_impact = 0
+
+    for diagnostic in diagnostics:
+        if diagnostic["impact"] > biggest_impact:
+            biggest_impact = diagnostic["impact"]
+            biggest_problem = diagnostic["category"]
+
+    if biggest_problem == "Packaging":
+        priority = (
+            "Thumbnail/title is the biggest opportunity. "
+            "Consider improving the focal point, contrast, clarity, "
+            "and curiosity of the packaging."
+        )
+
+    elif biggest_problem == "Retention":
+        priority = (
+            "Retention is the biggest opportunity. "
+            "Focus on the opening, remove slow sections, "
+            "and get to the main premise faster."
+        )
+
+    elif biggest_problem == "Engagement":
+        priority = (
+            "Engagement is the biggest opportunity. "
+            "Consider making the video more interactive and "
+            "giving viewers a reason to comment or like."
+        )
+
+    else:
+        priority = (
+            "No major weakness detected. "
+            "The video's core metrics are performing reasonably well."
+        )
+
+    # ==========================================
+    # 5. FINAL SCORE
+    # ==========================================
+
+    score = max(0, min(100, score))
+
+    if score >= 85:
+        overall = "🟢 Excellent"
+    elif score >= 70:
+        overall = "🟢 Strong"
+    elif score >= 55:
+        overall = "🟡 Average"
+    elif score >= 40:
+        overall = "🟠 Needs Improvement"
+    else:
+        overall = "🔴 Needs Major Improvement"
+
+    return score, overall, diagnostics, priority
