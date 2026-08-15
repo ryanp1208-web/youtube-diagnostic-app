@@ -26,13 +26,10 @@ if video_url:
     video_id = extract_video_id(video_url)
     if video_id:
         youtube = build('youtube', 'v3', developerKey=API_KEY)
-request = youtube.videos().list(
-    part="snippet,statistics",
-    id=video_id
-)
-response = request.execute()
+        request = youtube.videos().list(part="snippet,statistics", id=video_id)
+        response = request.execute()
+
         if response['items']:
-            item = response['items'][0]
             title = item['snippet']['title']
             channel_title = item['snippet']['channelTitle']
             channel_id = item['snippet']['channelId']
