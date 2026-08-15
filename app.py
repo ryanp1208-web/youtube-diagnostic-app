@@ -28,8 +28,9 @@ if video_url:
         youtube = build('youtube', 'v3', developerKey=API_KEY)
         request = youtube.videos().list(part="snippet,statistics", id=video_id)
         response = request.execute()
-
+        
         if response['items']:
+            item = response['items'][0]
             title = item['snippet']['title']
             channel_title = item['snippet']['channelTitle']
             channel_id = item['snippet']['channelId']
@@ -39,13 +40,13 @@ if video_url:
             likes = int(item['statistics'].get('likeCount', 0))
             
             # Additional fetch for channel subscriber count
-      channel_request = youtube.channels().list(part="statistics", id=channel_id)
+            channel_request = youtube.channels().list(part="statistics", id=channel_id)
             channel_response = channel_request.execute()
             sub_count = 0
             if channel_response['items']:
                 sub_count = int(channel_response['items'][0]['statistics'].get('subscriberCount', 0))
 
-           pub_date = datetime.fromisoformat(published_at_str.rstrip('Z'))
+            pub_date = datetime.fromisoformat(published_at_str.rstrip('Z'))
             days_old = (datetime.now(timezone.utc) - pub_date).days
             days_text = "Today" if days_old == 0 else f"{days_old} days ago"
 
