@@ -1,9 +1,10 @@
+import streamlit as st
 import re
-import statistics
+import time
 from datetime import datetime, timezone
 
-import streamlit as st
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 
 # ============================================================
@@ -13,74 +14,119 @@ from googleapiclient.discovery import build
 st.set_page_config(
     page_title="YouTube Video Doctor",
     page_icon="🩺",
-    layout="wide",
-)
-
-st.title("🩺 YouTube Video Doctor")
-st.caption(
-    "Analyze your video's performance and find areas for improvement."
+    layout="wide"
 )
 
 
 # ============================================================
-# YOUTUBE API
+# SECURITY / CONFIG
 # ============================================================
 
-YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY", "")
+# Put this in Streamlit Cloud Secrets:
+#
+# YOUTUBE_API_KEY = "YOUR_KEY_HERE"
+#
+# NEVER put the real API key directly into this file.
 
-if not YOUTUBE_API_KEY:
-    st.error("❌ YouTube API key is missing from Streamlit Secrets.")
-    st.stop()
-
-
-@st.cache_resource
-def youtube_client():
-    return build(
-        "youtube",
-        "v3",
-        developerKey=YOUTUBE_API_KEY,
-    )
+try:
+    API_KEY = st.secrets["YOUTUBE_API_KEY"]
+except Exception:
+    API_KEY = ""
 
 
 # ============================================================
-# EXTRACT VIDEO ID
+# SESSION SECURITY
+# ============================================================
+
+if "analysis_times" not in st.session_state:
+    st.session_state.analysis_times = []
+
+if "last_analysis_key" not in st.session_state:
+    st.session_state.last_analysis_key = None
+
+if "last_analysis_time" not in st.session_state:
+    st.session_state.last_analysis_time = 0
+
+
+MAX_ANALYSES_PER_HOUR = 10
+COOLDOWN_SECONDS = 10
+
+
+def check_rate_limit(analysis_key):
+    """Limit excessive use from one browser session."""
+
+    now = time.time()
+
+    # Remove timestamps older than one hour
+    st.session_state.analysis_times = [
+        t for t in st.session_state.analysis_times
+        if now - t < 3600
+    ]
+
+    # Cooldown
+    if now - st.session_state.last_analysis_time < COOLDOWN_SECONDS:
+        remaining = int(
+            COOLDOWN_SECONDS -
+            (now - st.session_state.last_analysis_time)
+        )
+        return False, f"Please wait {remaining} seconds before analyzing again."
+
+    # Hourly limit
+    if len(st.session_state.analysis_times) >= MAX_ANALYSES_PER_HOUR:
+        return False, (
+            "You've reached the limit of 10 analyses per hour "
+            "for this browser session. Try again later."
+        )
+
+    # Duplicate request
+    if analysis_key == st.session_state.last_analysis_key:
+        return False, (
+            "You already analyzed this video. "
+            "The previous result is still on this page."
+        )
+
+    return True, ""
+
+
+def record_analysis(analysis_key):
+    now = time.time()
+
+    st.session_state.analysis_times.append(now)
+    st.session_state.last_analysis_time = now
+    st.session_state.last_analysis_key = analysis_key
+
+
+# ============================================================
+# YOUTUBE HELPERS
 # ============================================================
 
 def extract_video_id(url):
+    """Extract a YouTube video ID from common URL formats."""
 
     if not url:
         return None
 
     patterns = [
-        r"(?:v=)([A-Za-z0-9_-]{11})",
+        r"(?:youtube\.com/watch\?v=)([A-Za-z0-9_-]{11})",
         r"(?:youtu\.be/)([A-Za-z0-9_-]{11})",
         r"(?:youtube\.com/shorts/)([A-Za-z0-9_-]{11})",
         r"(?:youtube\.com/embed/)([A-Za-z0-9_-]{11})",
     ]
 
     for pattern in patterns:
-
         match = re.search(pattern, url)
-
         if match:
             return match.group(1)
+
+    # Also allow users to paste just the ID
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", url.strip()):
+        return url.strip()
 
     return None
 
 
-def url_looks_like_short(url):
-
-    if not url:
-        return False
-
-    return "/shorts/" in url.lower()
-
-
-# ============================================================
-# PARSE VIDEO DURATION
-# ============================================================
-
-def parse_iso_duration(duration):
+def parse_duration(duration):
+    """Convert ISO 8601 YouTube duration to seconds."""
 
     if not duration:
         return 0
@@ -90,7 +136,7 @@ def parse_iso_duration(duration):
         r"(?:(\d+)H)?"
         r"(?:(\d+)M)?"
         r"(?:(\d+)S)?",
-        duration,
+        duration
     )
 
     if not match:
@@ -100,231 +146,139 @@ def parse_iso_duration(duration):
     minutes = int(match.group(2) or 0)
     seconds = int(match.group(3) or 0)
 
-    return (
-        hours * 3600
-        + minutes * 60
-        + seconds
-    )
+    return hours * 3600 + minutes * 60 + seconds
 
 
 def format_duration(seconds):
-
-    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
 
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
 
     if hours > 0:
-        return f"{hours}h {minutes}m {secs}s"
-
-    if minutes > 0:
-        return f"{minutes}m {secs}s"
-
-    return f"{secs}s"
-
-
-# ============================================================
-# VIDEO AGE
-# ============================================================
-
-def calculate_video_age(published_at):
-
-    try:
-
-        published = datetime.fromisoformat(
-            published_at.replace("Z", "+00:00")
-        )
-
-        now = datetime.now(timezone.utc)
-
-        difference = now - published
-
-        seconds = max(
-            0,
-            int(difference.total_seconds())
-        )
-
-        return seconds
-
-    except Exception:
-
-        return None
-
-
-def format_age(seconds):
-
-    if seconds is None:
-        return "Unknown"
-
-    days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    minutes = (seconds % 3600) // 60
-
-    if days > 0:
-        return f"{days}d {hours}h"
-
-    if hours > 0:
         return f"{hours}h {minutes}m"
+
+    if secs > 0:
+        return f"{minutes}m {secs}s"
 
     return f"{minutes}m"
 
 
+def get_video_type(seconds):
+    """
+    YouTube Shorts can be up to 3 minutes.
+    This is a duration-based heuristic rather than
+    an official Shorts classification.
+    """
+
+    if seconds <= 180:
+        return "Shorts / short-form"
+
+    return "Long-form video"
+
+
+def time_since_published(published):
+    try:
+        published_dt = datetime.fromisoformat(
+            published.replace("Z", "+00:00")
+        )
+
+        now = datetime.now(timezone.utc)
+        delta = now - published_dt
+
+        total_seconds = int(delta.total_seconds())
+
+        if total_seconds < 60:
+            return "Just now"
+
+        minutes = total_seconds // 60
+
+        if minutes < 60:
+            return f"{minutes} minutes ago"
+
+        hours = minutes // 60
+
+        if hours < 24:
+            return f"{hours} hours ago"
+
+        days = hours // 24
+
+        if days < 7:
+            return f"{days} days ago"
+
+        weeks = days // 7
+
+        if weeks < 5:
+            return f"{weeks} weeks ago"
+
+        months = days // 30
+
+        if months < 12:
+            return f"{months} months ago"
+
+        years = days // 365
+
+        return f"{years} years ago"
+
+    except Exception:
+        return "Unknown"
+
+
 # ============================================================
-# VIDEO TYPE
+# CACHED YOUTUBE REQUESTS
 # ============================================================
 
-def determine_video_type(
-    url,
-    duration_seconds,
-):
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_video(video_id):
+    """
+    Cached for one hour.
 
-    # A /shorts/ URL is the strongest signal available here.
-    if url_looks_like_short(url):
+    This is important because repeatedly analyzing
+    the same video won't repeatedly hit the YouTube API.
+    """
 
-        return {
-            "type": "short",
-            "confidence": "HIGH",
-            "label": "📱 YouTube Short",
-        }
+    if not API_KEY:
+        return None
 
-    # Videos 3 minutes or shorter are treated as Shorts
-    # candidates.
-    if duration_seconds <= 180:
+    youtube = build(
+        "youtube",
+        "v3",
+        developerKey=API_KEY,
+        cache_discovery=False
+    )
 
-        return {
-            "type": "short_candidate",
-            "confidence": "ESTIMATED",
-            "label": "📱 Shorts candidate",
-        }
-
-    return {
-        "type": "long_form",
-        "confidence": "HIGH",
-        "label": "🎬 Long-form video",
-    }
-
-
-# ============================================================
-# GET VIDEO INFORMATION
-# ============================================================
-
-@st.cache_data(ttl=300)
-def get_video(video_id):
-
-    yt = youtube_client()
-
-    response = yt.videos().list(
+    request = youtube.videos().list(
         part="snippet,statistics,contentDetails",
-        id=video_id,
-    ).execute()
+        id=video_id
+    )
+
+    response = request.execute()
 
     if not response.get("items"):
         return None
 
-    item = response["items"][0]
+    return response["items"][0]
 
-    snippet = item["snippet"]
-    stats = item.get("statistics", {})
-    content = item.get("contentDetails", {})
 
-    thumbnails = snippet.get(
-        "thumbnails",
-        {}
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_recent_uploads(channel_id):
+    """Fetch recent uploads using the channel's uploads playlist."""
+
+    if not API_KEY:
+        return []
+
+    youtube = build(
+        "youtube",
+        "v3",
+        developerKey=API_KEY,
+        cache_discovery=False
     )
 
-    thumbnail = (
-        thumbnails.get("maxres")
-        or thumbnails.get("high")
-        or thumbnails.get("medium")
-        or thumbnails.get("default")
-    )
-
-    duration_seconds = parse_iso_duration(
-        content.get("duration", "")
-    )
-
-    published_at = snippet.get(
-        "publishedAt",
-        ""
-    )
-
-    age_seconds = calculate_video_age(
-        published_at
-    )
-
-    return {
-        "id": video_id,
-
-        "title": snippet.get(
-            "title",
-            "Unknown title"
-        ),
-
-        "channel_title": snippet.get(
-            "channelTitle",
-            "Unknown channel"
-        ),
-
-        "channel_id": snippet.get(
-            "channelId",
-            ""
-        ),
-
-        "published_at": published_at,
-
-        "age_seconds": age_seconds,
-
-        "duration_seconds": duration_seconds,
-
-        "duration": format_duration(
-            duration_seconds
-        ),
-
-        "thumbnail": (
-            thumbnail["url"]
-            if thumbnail
-            else None
-        ),
-
-        "views": int(
-            stats.get(
-                "viewCount",
-                0
-            )
-        ),
-
-        "likes": int(
-            stats.get(
-                "likeCount",
-                0
-            )
-        ),
-
-        "comments": int(
-            stats.get(
-                "commentCount",
-                0
-            )
-        ),
-    }
-
-
-# ============================================================
-# RECENT CHANNEL VIDEOS
-# ============================================================
-
-@st.cache_data(ttl=300)
-def get_recent_videos(
-    channel_id,
-    limit=20,
-):
-
-    yt = youtube_client()
-
-    channel_response = yt.channels().list(
+    channel_response = youtube.channels().list(
         part="contentDetails",
-        id=channel_id,
+        id=channel_id
     ).execute()
 
     if not channel_response.get("items"):
@@ -337,667 +291,358 @@ def get_recent_videos(
         ["uploads"]
     )
 
-    playlist_response = yt.playlistItems().list(
-        part="contentDetails,snippet",
+    playlist_response = youtube.playlistItems().list(
+        part="snippet",
         playlistId=uploads_playlist,
-        maxResults=limit,
+        maxResults=8
     ).execute()
 
-    ids = []
+    results = []
 
-    for item in playlist_response.get(
-        "items",
-        []
-    ):
+    for item in playlist_response.get("items", []):
+        snippet = item.get("snippet", {})
 
-        video_id = item[
-            "contentDetails"
-        ].get("videoId")
-
-        if video_id:
-            ids.append(video_id)
-
-    if not ids:
-        return []
-
-    details = yt.videos().list(
-        part="snippet,statistics,contentDetails",
-        id=",".join(ids),
-    ).execute()
-
-    videos = []
-
-    for item in details.get(
-        "items",
-        []
-    ):
-
-        stats = item.get(
-            "statistics",
-            {}
-        )
-
-        duration_seconds = parse_iso_duration(
-            item.get(
-                "contentDetails",
-                {}
-            ).get(
-                "duration",
-                ""
+        results.append({
+            "title": snippet.get("title", "Untitled"),
+            "published": snippet.get("publishedAt", ""),
+            "video_id": (
+                snippet.get("resourceId", {})
+                .get("videoId", "")
             )
-        )
-
-        videos.append({
-            "id": item["id"],
-
-            "title": item["snippet"].get(
-                "title",
-                ""
-            ),
-
-            "views": int(
-                stats.get(
-                    "viewCount",
-                    0
-                )
-            ),
-
-            "likes": int(
-                stats.get(
-                    "likeCount",
-                    0
-                )
-            ),
-
-            "comments": int(
-                stats.get(
-                    "commentCount",
-                    0
-                )
-            ),
-
-            "published_at": item["snippet"].get(
-                "publishedAt",
-                ""
-            ),
-
-            "duration_seconds": duration_seconds,
         })
 
-    return videos
+    return results
 
 
 # ============================================================
-# ENGAGEMENT
+# DIAGNOSTIC ENGINE
 # ============================================================
 
-def engagement_rate(
-    views,
-    likes,
-    comments,
-):
-
-    if views <= 0:
-        return 0
-
-    return (
-        (likes + comments)
-        / views
-    ) * 100
-
-
-# ============================================================
-# CHANNEL COMPARISON
-# ============================================================
-
-def calculate_channel_stats(
-    current_views,
-    videos,
-):
-
-    if not videos:
-        return None
-
-    values = [
-        v["views"]
-        for v in videos
-        if v["views"] >= 0
-    ]
-
-    if not values:
-        return None
-
-    average = statistics.mean(values)
-    median = statistics.median(values)
-    best = max(values)
-
-    return {
-        "average": average,
-        "median": median,
-        "best": best,
-
-        "ratio": (
-            current_views / average
-            if average > 0
-            else 0
-        ),
-
-        "count": len(values),
-    }
-
-
-# ============================================================
-# SHORTS COMPARISON
-# ============================================================
-
-def is_shortish(video):
-
-    return video["duration_seconds"] <= 180
-
-
-def get_short_comparison(
-    current_views,
-    recent_videos,
-):
-
-    shorts = [
-        video
-        for video in recent_videos
-        if is_shortish(video)
-    ]
-
-    if not shorts:
-        return None
-
-    values = [
-        video["views"]
-        for video in shorts
-    ]
-
-    average = statistics.mean(values)
-    best = max(values)
-
-    return {
-        "count": len(values),
-        "average": average,
-        "best": best,
-
-        "ratio": (
-            current_views / average
-            if average > 0
-            else 0
-        ),
-    }
-
-
-# ============================================================
-# VIEW VELOCITY
-# ============================================================
-
-def calculate_velocity(
-    views,
-    age_seconds,
-):
-
-    if not age_seconds or age_seconds <= 0:
-        return None
-
-    hours = age_seconds / 3600
-
-    if hours <= 0:
-        return None
-
-    return views / hours
-
-
-def format_velocity(
-    views_per_hour,
-):
-
-    if views_per_hour is None:
-        return "Unknown"
-
-    if views_per_hour >= 1000000:
-        return f"{views_per_hour / 1000000:.2f}M/hour"
-
-    if views_per_hour >= 1000:
-        return f"{views_per_hour / 1000:.1f}K/hour"
-
-    return f"{views_per_hour:.0f}/hour"
-
-
-# ============================================================
-# CTR SCORE
-# ============================================================
-
-def ctr_score(
+def calculate_diagnosis(
     ctr,
     impressions,
+    retention,
+    views,
+    likes,
+    published,
+    duration_seconds
 ):
 
-    if impressions < 500:
+    problems = []
+    positives = []
+    actions = []
+
+    # --------------------------------------------------------
+    # CTR
+    # --------------------------------------------------------
+
+    if ctr <= 0:
+        pass
+
+    elif impressions < 2000:
 
         if ctr >= 8:
-            return 75
+            positives.append(
+                "Your CTR is strong for a video with a small impression pool."
+            )
 
-        if ctr >= 5:
-            return 60
+        elif ctr >= 5:
+            positives.append(
+                "Your CTR is acceptable, but YouTube has not pushed the video very far yet."
+            )
 
-        return 40
+        else:
+            problems.append(
+                "CTR is weak while the video is still in a small impression pool."
+            )
+            actions.append(
+                "Test a stronger thumbnail concept and a clearer title."
+            )
 
-    if ctr >= 10:
-        return 100
+    elif impressions >= 100000:
 
-    if ctr >= 8:
-        return 90
+        if ctr >= 6:
+            positives.append(
+                "Your CTR is strong even at large distribution."
+            )
 
-    if ctr >= 6:
-        return 80
+        elif ctr >= 3.5:
+            problems.append(
+                "CTR is mediocre at large scale."
+            )
+            actions.append(
+                "Consider improving the thumbnail/title package before changing the video itself."
+            )
 
-    if ctr >= 4.5:
-        return 65
-
-    if ctr >= 3:
-        return 45
-
-    return 25
-
-
-# ============================================================
-# RETENTION SCORE
-# ============================================================
-
-def retention_score(
-    retention,
-):
-
-    if retention >= 60:
-        return 100
-
-    if retention >= 50:
-        return 90
-
-    if retention >= 45:
-        return 82
-
-    if retention >= 40:
-        return 74
-
-    if retention >= 35:
-        return 62
-
-    if retention >= 30:
-        return 50
-
-    if retention >= 20:
-        return 30
-
-    return 15
-
-
-# ============================================================
-# IMPRESSIONS SCORE
-# ============================================================
-
-def impressions_score(
-    impressions,
-):
-
-    if impressions >= 100000:
-        return 100
-
-    if impressions >= 50000:
-        return 95
-
-    if impressions >= 20000:
-        return 90
-
-    if impressions >= 10000:
-        return 82
-
-    if impressions >= 5000:
-        return 72
-
-    if impressions >= 2000:
-        return 60
-
-    if impressions >= 1000:
-        return 48
-
-    return 30
-
-
-# ============================================================
-# ENGAGEMENT SCORE
-# ============================================================
-
-def engagement_score(
-    engagement,
-):
-
-    if engagement >= 8:
-        return 100
-
-    if engagement >= 5:
-        return 90
-
-    if engagement >= 3:
-        return 78
-
-    if engagement >= 2:
-        return 65
-
-    if engagement >= 1:
-        return 50
-
-    return 30
-
-
-# ============================================================
-# HEALTH LABEL
-# ============================================================
-
-def health_label(score):
-
-    if score >= 90:
-        return "🔥 Excellent"
-
-    if score >= 80:
-        return "🟢 Strong"
-
-    if score >= 65:
-        return "🟡 Decent"
-
-    if score >= 50:
-        return "🟠 Needs improvement"
-
-    return "🔴 Weak"
-
-
-# ============================================================
-# TITLE ANALYSIS
-# ============================================================
-
-def analyze_title(title):
-
-    score = 100
-    checks = []
-
-    length = len(title)
-
-    if length > 80:
-
-        score -= 25
-
-        checks.append(
-            "⚠️ Title is very long."
-        )
-
-    elif length > 65:
-
-        score -= 10
-
-        checks.append(
-            "🟡 Title is somewhat long."
-        )
+        else:
+            problems.append(
+                "CTR is weak despite significant distribution."
+            )
+            actions.append(
+                "The packaging is probably limiting further clicks."
+            )
 
     else:
 
-        checks.append(
-            "🟢 Title length looks reasonable."
+        if ctr >= 7:
+            positives.append(
+                "Strong packaging: your CTR is performing well."
+            )
+
+        elif ctr >= 5:
+            positives.append(
+                "CTR is in a reasonable range."
+            )
+
+        elif ctr >= 3.5:
+            problems.append(
+                "CTR is somewhat weak."
+            )
+            actions.append(
+                "Try a more immediately understandable thumbnail and title."
+            )
+
+        else:
+            problems.append(
+                "CTR is low."
+            )
+            actions.append(
+                "Prioritize thumbnail and title improvements."
+            )
+
+    # --------------------------------------------------------
+    # RETENTION
+    # --------------------------------------------------------
+
+    if retention > 0:
+
+        if retention >= 50:
+            positives.append(
+                "Retention is excellent."
+            )
+
+        elif retention >= 40:
+            positives.append(
+                "Retention is solid."
+            )
+
+        elif retention >= 30:
+            problems.append(
+                "Retention is somewhat weak."
+            )
+            actions.append(
+                "Tighten the opening and remove slow sections."
+            )
+
+        else:
+            problems.append(
+                "Retention is low."
+            )
+            actions.append(
+                "The opening likely isn't paying off the thumbnail/title promise quickly enough."
+            )
+
+    # --------------------------------------------------------
+    # VIEWS
+    # --------------------------------------------------------
+
+    published_text = time_since_published(published)
+
+    try:
+        published_dt = datetime.fromisoformat(
+            published.replace("Z", "+00:00")
         )
 
-    if title.isupper() and len(title) > 10:
+        hours_old = max(
+            1,
+            (
+                datetime.now(timezone.utc) -
+                published_dt
+            ).total_seconds() / 3600
+        )
 
-        score -= 10
+        view_velocity = views / hours_old
 
-        checks.append(
-            "⚠️ Entire title is uppercase."
+    except Exception:
+        view_velocity = 0
+
+    # --------------------------------------------------------
+    # LIKES
+    # --------------------------------------------------------
+
+    if views > 0 and likes > 0:
+
+        like_rate = (likes / views) * 100
+
+        if like_rate >= 4:
+            positives.append(
+                "Viewer engagement through likes is strong."
+            )
+
+        elif like_rate < 1:
+            problems.append(
+                "Like engagement is relatively low."
+            )
+
+    # --------------------------------------------------------
+    # OVERALL SCORE
+    # --------------------------------------------------------
+
+    score = 50
+
+    if ctr >= 7:
+        score += 15
+    elif ctr >= 5:
+        score += 8
+    elif ctr > 0 and ctr < 3.5:
+        score -= 15
+
+    if retention >= 50:
+        score += 20
+    elif retention >= 40:
+        score += 10
+    elif retention > 0 and retention < 30:
+        score -= 15
+
+    if impressions >= 100000 and ctr >= 5:
+        score += 5
+
+    if views > 0 and likes > 0:
+        like_rate = (likes / views) * 100
+
+        if like_rate >= 4:
+            score += 5
+        elif like_rate < 1:
+            score -= 5
+
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        health = "Excellent"
+    elif score >= 65:
+        health = "Healthy"
+    elif score >= 50:
+        health = "Mixed"
+    else:
+        health = "Needs attention"
+
+    # --------------------------------------------------------
+    # WHAT IS HURTING?
+    # --------------------------------------------------------
+
+    if not problems:
+        problems.append(
+            "No major problem is obvious from the metrics provided."
+        )
+
+    # --------------------------------------------------------
+    # WHAT I'D DO
+    # --------------------------------------------------------
+
+    if not actions:
+        actions.append(
+            "Keep the current packaging and focus on making the next video equally compelling."
         )
 
     return {
-        "score": max(0, score),
-        "checks": checks,
+        "score": score,
+        "health": health,
+        "problems": problems,
+        "positives": positives,
+        "actions": actions,
+        "view_velocity": view_velocity,
+        "published_text": published_text
     }
 
 
 # ============================================================
-# BOTTLENECK DIAGNOSIS
+# TITLE DIAGNOSTIC
 # ============================================================
 
-def determine_bottleneck(
-    ctr,
-    impressions,
-    retention,
-    channel_stats,
-    is_short,
-):
+def title_diagnosis(title):
 
-    if is_short:
+    title = title.strip()
 
-        if retention < 50:
+    if len(title) < 25:
+        return "Your title is quite short. Consider adding enough context to make the premise obvious."
 
-            return {
-                "title": "Retention is the biggest concern",
+    if len(title) <= 65:
+        return "Your title length is in a generally useful range."
 
-                "reason": (
-                    "Viewers may not be staying with the Short "
-                    "long enough."
-                ),
+    if len(title) <= 80:
+        return "Your title is fairly long. Consider making it more concise."
 
-                "action": (
-                    "Improve the opening, pacing, payoff, "
-                    "and rewatchability."
-                ),
-
-                "type": "retention",
-            }
-
-        if (
-            channel_stats
-            and channel_stats["ratio"] < 0.6
-        ):
-
-            return {
-                "title": "Shorts distribution is weak",
-
-                "reason": (
-                    "This Short is receiving significantly "
-                    "fewer views than your recent comparable Shorts."
-                ),
-
-                "action": (
-                    "Study the topic, opening, pacing, and "
-                    "viewer response of your stronger Shorts."
-                ),
-
-                "type": "distribution",
-            }
-
-        return {
-            "title": "Short is showing healthy signals",
-
-            "reason": (
-                "There isn't one obvious major weakness "
-                "from the available data."
-            ),
-
-            "action": (
-                "Keep monitoring its view velocity."
-            ),
-
-            "type": "healthy",
-        }
-
-
-    # --------------------------------------------------------
-    # LONG-FORM
-    # --------------------------------------------------------
-
-    if impressions < 500:
-
-        return {
-            "title": "Not enough data yet",
-
-            "reason": (
-                "The video hasn't received enough impressions "
-                "to make a reliable packaging diagnosis."
-            ),
-
-            "action": (
-                "Wait for more data before making major changes."
-            ),
-
-            "type": "data",
-        }
-
-
-    if ctr < 4.5 and retention >= 40:
-
-        return {
-            "title": "Packaging is the main bottleneck",
-
-            "reason": (
-                "People who click appear reasonably interested, "
-                "but the click-through rate is weak."
-            ),
-
-            "action": (
-                "Test the thumbnail/title combination."
-            ),
-
-            "type": "packaging",
-        }
-
-
-    if ctr >= 7 and retention < 35:
-
-        return {
-            "title": "Retention is the main bottleneck",
-
-            "reason": (
-                "People are clicking, but many are leaving."
-            ),
-
-            "action": (
-                "Improve the opening, pacing, and payoff."
-            ),
-
-            "type": "retention",
-        }
-
-
-    if (
-        channel_stats
-        and channel_stats["ratio"] < 0.6
-        and ctr >= 5
-    ):
-
-        return {
-            "title": "Distribution is the main bottleneck",
-
-            "reason": (
-                "CTR is reasonably healthy, but the video is "
-                "performing well below your recent view average."
-            ),
-
-            "action": (
-                "Don't immediately blame the thumbnail. "
-                "Monitor impressions and topic performance."
-            ),
-
-            "type": "distribution",
-        }
-
-
-    if ctr < 4.5 and retention < 35:
-
-        return {
-            "title": "Packaging and retention both need work",
-
-            "reason": (
-                "The video is struggling to generate clicks "
-                "and keep viewers."
-            ),
-
-            "action": (
-                "Improve packaging first, then work on the opening."
-            ),
-
-            "type": "both",
-        }
-
-
-    return {
-        "title": "Performance is mixed",
-
-        "reason": (
-            "There isn't one overwhelmingly weak metric."
-        ),
-
-        "action": (
-            "Focus on whichever metric is furthest below "
-            "your normal performance."
-        ),
-
-        "type": "mixed",
-    }
+    return "Your title is very long. A shorter, sharper version may communicate the premise faster."
 
 
 # ============================================================
-# VIDEO URL INPUT
+# HEADER
 # ============================================================
 
-st.subheader("🎬 Analyze a Video")
+st.title("🩺 YouTube Video Doctor")
+
+st.caption(
+    "Analyze CTR, impressions, retention, engagement, packaging, "
+    "view velocity, and video age."
+)
+
+
+# ============================================================
+# API KEY CHECK
+# ============================================================
+
+if not API_KEY:
+
+    st.error(
+        "YouTube API key is not configured. "
+        "Add YOUTUBE_API_KEY to Streamlit Secrets."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# URL INPUT
+# ============================================================
 
 video_url = st.text_input(
-    "Paste your YouTube URL",
+    "Paste your YouTube video URL",
     placeholder="https://www.youtube.com/watch?v=..."
 )
 
 
 # ============================================================
-# YOUTUBE STUDIO METRICS
+# ANALYTICS INPUT
 # ============================================================
 
-st.subheader(
-    "📊 YouTube Studio Metrics"
-)
+st.subheader("📊 Your YouTube Analytics")
 
-st.caption(
-    "Enter these from YouTube Studio. "
-    "They are private channel analytics."
-)
+col1, col2, col3 = st.columns(3)
 
-c1, c2, c3 = st.columns(3)
-
-with c1:
-
+with col1:
     ctr = st.number_input(
         "CTR (%)",
         min_value=0.0,
         max_value=100.0,
         value=0.0,
-        step=0.1,
+        step=0.1
     )
 
-with c2:
-
+with col2:
     impressions = st.number_input(
         "Impressions",
         min_value=0,
         value=0,
-        step=100,
+        step=100
     )
 
-with c3:
-
+with col3:
     retention = st.number_input(
-        "Average percentage viewed (%)",
+        "Average Percentage Viewed (%)",
         min_value=0.0,
         max_value=100.0,
         value=0.0,
-        step=0.1,
+        step=0.1
     )
 
 
@@ -1005,972 +650,385 @@ with c3:
 # ANALYZE BUTTON
 # ============================================================
 
-if st.button(
-    "🩺 Diagnose Video",
+analyze = st.button(
+    "🔎 Analyze Video",
     type="primary",
-    use_container_width=True,
-):
+    use_container_width=True
+)
 
-    video_id = extract_video_id(
-        video_url
-    )
+
+if analyze:
+
+    # --------------------------------------------------------
+    # URL CHECK
+    # --------------------------------------------------------
+
+    video_id = extract_video_id(video_url)
 
     if not video_id:
+        st.error(
+            "I couldn't recognize that YouTube URL. "
+            "Try pasting the normal YouTube video link."
+        )
+        st.stop()
+
+    # --------------------------------------------------------
+    # RATE LIMIT
+    # --------------------------------------------------------
+
+    analysis_key = f"{video_id}:{ctr}:{impressions}:{retention}"
+
+    allowed, message = check_rate_limit(analysis_key)
+
+    if not allowed:
+
+        if "already analyzed" in message.lower():
+            st.info(message)
+        else:
+            st.warning(message)
+
+        st.stop()
+
+    # --------------------------------------------------------
+    # YOUTUBE REQUEST
+    # --------------------------------------------------------
+
+    try:
+
+        with st.spinner("Checking the video..."):
+
+            video = fetch_video(video_id)
+
+        if not video:
+            st.error(
+                "That video couldn't be found or isn't accessible."
+            )
+            st.stop()
+
+        record_analysis(analysis_key)
+
+    except HttpError as error:
 
         st.error(
-            "❌ Please enter a valid YouTube video URL."
+            "YouTube API error. Your API quota may have been "
+            "reached or the API key may have a configuration issue."
         )
 
         st.stop()
 
+    except Exception as error:
 
-    with st.spinner(
-        "Analyzing video..."
-    ):
-
-        try:
-
-            video = get_video(
-                video_id
-            )
-
-            if not video:
-
-                st.error(
-                    "❌ Video could not be found."
-                )
-
-                st.stop()
-
-
-            recent = get_recent_videos(
-                video["channel_id"],
-                20,
-            )
-
-        except Exception as error:
-
-            st.error(
-                f"❌ YouTube API error: {error}"
-            )
-
-            st.stop()
-
-
-    # ========================================================
-    # VIDEO TYPE
-    # ========================================================
-
-    video_type = determine_video_type(
-        video_url,
-        video["duration_seconds"],
-    )
-
-    is_short = video_type["type"] in [
-        "short",
-        "short_candidate",
-    ]
-
-
-    # ========================================================
-    # RECENT VIDEOS
-    # ========================================================
-
-    other_videos = [
-        v
-        for v in recent
-        if v["id"] != video_id
-    ]
-
-
-    # ========================================================
-    # CHANNEL COMPARISON
-    # ========================================================
-
-    if is_short:
-
-        channel_stats = get_short_comparison(
-            video["views"],
-            other_videos,
+        st.error(
+            "Something went wrong while contacting YouTube."
         )
 
-    else:
+        st.stop()
 
-        channel_stats = calculate_channel_stats(
-            video["views"],
-            other_videos,
+    # --------------------------------------------------------
+    # VIDEO DATA
+    # --------------------------------------------------------
+
+    snippet = video.get("snippet", {})
+    statistics = video.get("statistics", {})
+    content = video.get("contentDetails", {})
+
+    title = snippet.get("title", "Untitled")
+    channel_title = snippet.get("channelTitle", "Unknown channel")
+    channel_id = snippet.get("channelId", "")
+
+    thumbnail = (
+        snippet.get("thumbnails", {})
+        .get("high", {})
+        .get("url")
+    )
+
+    published = snippet.get(
+        "publishedAt",
+        ""
+    )
+
+    views = int(
+        statistics.get(
+            "viewCount",
+            0
         )
-
-
-    # ========================================================
-    # AGE AND VELOCITY
-    # ========================================================
-
-    age_seconds = video[
-        "age_seconds"
-    ]
-
-    velocity = calculate_velocity(
-        video["views"],
-        age_seconds,
     )
 
-
-    # ========================================================
-    # ENGAGEMENT
-    # ========================================================
-
-    engagement = engagement_rate(
-        video["views"],
-        video["likes"],
-        video["comments"],
+    likes = int(
+        statistics.get(
+            "likeCount",
+            0
+        )
     )
 
+    duration_seconds = parse_duration(
+        content.get("duration", "")
+    )
 
-    # ========================================================
+    video_type = get_video_type(
+        duration_seconds
+    )
+
+    duration_text = format_duration(
+        duration_seconds
+    )
+
+    # --------------------------------------------------------
     # DIAGNOSIS
-    # ========================================================
+    # --------------------------------------------------------
 
-    bottleneck = determine_bottleneck(
-        ctr,
-        impressions,
-        retention,
-        channel_stats,
-        is_short,
+    diagnosis = calculate_diagnosis(
+        ctr=ctr,
+        impressions=impressions,
+        retention=retention,
+        views=views,
+        likes=likes,
+        published=published,
+        duration_seconds=duration_seconds
     )
 
-
-    # ========================================================
+    # --------------------------------------------------------
     # TITLE
-    # ========================================================
+    # --------------------------------------------------------
 
-    title_analysis = analyze_title(
-        video["title"]
-    )
-
+    title_check = title_diagnosis(title)
 
     # ========================================================
-    # SCORES
-    # ========================================================
-
-    c_score = ctr_score(
-        ctr,
-        impressions,
-    )
-
-    r_score = retention_score(
-        retention,
-    )
-
-    i_score = impressions_score(
-        impressions,
-    )
-
-    e_score = engagement_score(
-        engagement,
-    )
-
-
-    if channel_stats:
-
-        ratio = channel_stats["ratio"]
-
-        if ratio >= 1.5:
-            channel_score = 100
-
-        elif ratio >= 1:
-            channel_score = 80
-
-        elif ratio >= 0.75:
-            channel_score = 65
-
-        elif ratio >= 0.5:
-            channel_score = 45
-
-        else:
-            channel_score = 25
-
-    else:
-
-        channel_score = 50
-
-
-    # ========================================================
-    # HEALTH SCORE
-    # ========================================================
-
-    if is_short:
-
-        health = round(
-            r_score * 0.35
-            + channel_score * 0.30
-            + e_score * 0.20
-            + i_score * 0.15
-        )
-
-    else:
-
-        health = round(
-            c_score * 0.30
-            + r_score * 0.30
-            + i_score * 0.15
-            + e_score * 0.10
-            + channel_score * 0.15
-        )
-
-
-    # ========================================================
-    # RESULT HEADER
+    # VIDEO HEADER
     # ========================================================
 
     st.divider()
 
-    st.header(
-        video["title"]
-    )
+    st.header(title)
 
     st.caption(
-        f"Channel: {video['channel_title']}"
+        f"Channel: **{channel_title}**"
     )
 
+    if video_type == "Shorts / short-form":
 
-    # ========================================================
-    # VIDEO TYPE
-    # ========================================================
-
-    if video_type["type"] == "short":
-
-        st.success(
-            "📱 **YouTube Short detected.**"
-        )
-
-    elif video_type["type"] == "short_candidate":
-
-        st.warning(
-            "📱 **Shorts candidate:** this video is 3 minutes "
-            "or shorter."
+        st.info(
+            f"📱 **{video_type}**"
         )
 
     else:
 
         st.info(
-            "🎬 **Long-form video**"
+            f"🎬 **{video_type}**"
         )
 
-
     # ========================================================
-    # VIDEO INFORMATION
+    # VIDEO INFO
     # ========================================================
 
-    left, right = st.columns(
-        [1, 2]
-    )
+    info1, info2, info3 = st.columns(3)
 
-    with left:
+    with info1:
 
-        if video["thumbnail"]:
-
+        if thumbnail:
             st.image(
-                video["thumbnail"],
-                use_container_width=True,
+                thumbnail,
+                use_container_width=True
             )
 
+    with info2:
 
-    with right:
-
-        st.subheader(
-            "⏱️ Video Information"
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
+        st.metric(
             "Video Length",
-            video["duration"],
+            duration_text
         )
 
-        c2.metric(
-            "Age",
-            format_age(
-                age_seconds
-            ),
+        st.metric(
+            "Published",
+            diagnosis["published_text"]
         )
 
-        c3.metric(
-            "Views",
-            f"{video['views']:,}",
+    with info3:
+
+        st.metric(
+            "View Velocity",
+            f"{diagnosis['view_velocity']:.1f}/hour"
         )
 
+        if views > 0:
 
-        if video["published_at"]:
-
-            try:
-
-                published = datetime.fromisoformat(
-                    video["published_at"].replace(
-                        "Z",
-                        "+00:00"
-                    )
-                )
-
-                st.write(
-                    "**Published:** "
-                    + published.strftime(
-                        "%B %d, %Y at %I:%M %p UTC"
-                    )
-                )
-
-            except Exception:
-
-                pass
-
-
-        if velocity is not None:
+            like_rate = (
+                likes / views
+            ) * 100
 
             st.metric(
-                "View Velocity",
-                format_velocity(
-                    velocity
-                ),
+                "Like Rate",
+                f"{like_rate:.2f}%"
             )
 
-
     # ========================================================
-    # BASIC PERFORMANCE
-    # ========================================================
-
-    st.divider()
-
-    st.header(
-        "📊 Current Performance"
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Views",
-        f"{video['views']:,}",
-    )
-
-    c2.metric(
-        "Likes",
-        f"{video['likes']:,}",
-    )
-
-    c3.metric(
-        "Comments",
-        f"{video['comments']:,}",
-    )
-
-    c4.metric(
-        "Engagement",
-        f"{engagement:.2f}%",
-    )
-
-
-    # ========================================================
-    # SHORTS / LONG FORM METRICS
+    # CURRENT PERFORMANCE
     # ========================================================
 
-    if is_short:
+    st.subheader("📊 Current Performance")
 
-        st.subheader(
-            "📱 Shorts Performance"
-        )
+    p1, p2, p3, p4 = st.columns(4)
 
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
+    with p1:
+        st.metric(
             "Views",
-            f"{video['views']:,}",
+            f"{views:,}"
         )
 
-        c2.metric(
-            "Views / Hour",
-            format_velocity(
-                velocity
-            ),
+    with p2:
+        st.metric(
+            "Likes",
+            f"{likes:,}"
         )
 
-        c3.metric(
-            "Retention",
-            f"{retention:.1f}%",
-        )
-
-        if channel_stats:
-
-            st.info(
-                f"Your recent comparable Shorts average "
-                f"**{channel_stats['average']:,.0f} views**."
-            )
-
-    else:
-
-        st.subheader(
-            "🎬 Long-form Performance"
-        )
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
+    with p3:
+        st.metric(
             "CTR",
-            f"{ctr:.1f}%",
+            f"{ctr:.1f}%"
         )
 
-        c2.metric(
+    with p4:
+        st.metric(
             "Impressions",
-            f"{impressions:,}",
+            f"{impressions:,}"
         )
 
-        c3.metric(
-            "Retention",
-            f"{retention:.1f}%",
-        )
+    if retention > 0:
 
+        st.metric(
+            "Average Percentage Viewed",
+            f"{retention:.1f}%"
+        )
 
     # ========================================================
-    # VIDEO HEALTH
-    # ========================================================
-
-    st.divider()
-
-    st.header(
-        "🩺 Video Health"
-    )
-
-    st.metric(
-        "Health Score",
-        f"{health}/100",
-    )
-
-    st.subheader(
-        health_label(health)
-    )
-
-
-    # ========================================================
-    # COMPONENT SCORES
-    # ========================================================
-
-    st.subheader(
-        "Component Scores"
-    )
-
-    if is_short:
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Retention",
-            f"{r_score}/100",
-        )
-
-        c2.metric(
-            "Channel",
-            f"{channel_score}/100",
-        )
-
-        c3.metric(
-            "Engagement",
-            f"{e_score}/100",
-        )
-
-        c4.metric(
-            "Distribution",
-            f"{i_score}/100",
-        )
-
-    else:
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-
-        c1.metric(
-            "CTR",
-            f"{c_score}/100",
-        )
-
-        c2.metric(
-            "Retention",
-            f"{r_score}/100",
-        )
-
-        c3.metric(
-            "Impressions",
-            f"{i_score}/100",
-        )
-
-        c4.metric(
-            "Engagement",
-            f"{e_score}/100",
-        )
-
-        c5.metric(
-            "Channel",
-            f"{channel_score}/100",
-        )
-
-
-    # ========================================================
-    # MAIN DIAGNOSIS
+    # HEALTH
     # ========================================================
 
     st.divider()
 
-    st.header(
-        "🚨 What's Actually Holding This Video Back?"
-    )
+    st.subheader("🩺 Video Health")
 
-    if bottleneck["type"] == "healthy":
+    h1, h2 = st.columns(2)
 
-        st.success(
-            f"🟢 **{bottleneck['title']}**\n\n"
-            f"{bottleneck['reason']}\n\n"
-            f"**What to do:** {bottleneck['action']}"
+    with h1:
+
+        st.metric(
+            "Diagnostic Score",
+            f"{diagnosis['score']}/100"
         )
 
-    elif bottleneck["type"] == "data":
+    with h2:
 
-        st.info(
-            f"⚪ **{bottleneck['title']}**\n\n"
-            f"{bottleneck['reason']}\n\n"
-            f"**What to do:** {bottleneck['action']}"
+        st.metric(
+            "Overall Health",
+            diagnosis["health"]
         )
-
-    else:
-
-        st.warning(
-            f"🔴 **{bottleneck['title']}**\n\n"
-            f"{bottleneck['reason']}\n\n"
-            f"**What to do:** {bottleneck['action']}"
-        )
-
 
     # ========================================================
-    # CHANNEL COMPARISON
+    # WHAT'S WORKING
     # ========================================================
 
-    if channel_stats:
+    if diagnosis["positives"]:
 
-        st.divider()
+        st.subheader("🟢 What's Working")
 
-        if is_short:
-
-            st.header(
-                "📱 Compared With Your Other Shorts"
-            )
-
-        else:
-
-            st.header(
-                "🆚 Compared With Your Channel"
-            )
-
-
-        c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Your Average",
-            f"{channel_stats['average']:,.0f}",
-        )
-
-        c2.metric(
-            "This Video",
-            f"{channel_stats['ratio']:.2f}×",
-        )
-
-        c3.metric(
-            "Your Best",
-            f"{channel_stats['best']:,}",
-        )
-
-
-        ratio = channel_stats["ratio"]
-
-
-        if ratio >= 1.5:
-
-            st.success(
-                "🔥 This video is performing substantially "
-                "above your recent comparison group."
-            )
-
-        elif ratio >= 1:
-
-            st.success(
-                "🟢 This video is around or above your normal performance."
-            )
-
-        elif ratio >= 0.75:
-
-            st.warning(
-                "🟡 This video is somewhat below your normal performance."
-            )
-
-        else:
-
-            st.error(
-                "🔴 This video is substantially below your normal performance."
-            )
-
+        for item in diagnosis["positives"]:
+            st.success(item)
 
     # ========================================================
-    # MOMENTUM
+    # WHAT'S HURTING
     # ========================================================
 
-    st.divider()
+    st.subheader("🚨 What's Hurting")
 
-    st.header(
-        "🚀 Momentum"
-    )
+    for item in diagnosis["problems"]:
+        st.error(item)
 
-    if age_seconds is not None:
+    # ========================================================
+    # WHAT I'D DO
+    # ========================================================
 
-        if age_seconds < 6 * 3600:
+    st.subheader("🎯 What I'd Do")
 
-            st.info(
-                "🕐 **Very early:** this video has been live for "
-                "less than 6 hours. Avoid making major conclusions yet."
-            )
-
-        elif age_seconds < 24 * 3600:
-
-            st.info(
-                "🟡 **Early:** the video has been live for less "
-                "than a day. Momentum can still change considerably."
-            )
-
-        elif age_seconds < 3 * 86400:
-
-            st.warning(
-                "🟠 **Developing:** enough time has passed for "
-                "an early comparison, but performance can still change."
-            )
-
-        else:
-
-            st.success(
-                "🟢 **Established:** the video has been live long "
-                "enough for a more meaningful comparison."
-            )
-
-
-    if velocity is not None:
-
-        st.write(
-            f"Current view velocity: **{format_velocity(velocity)}**"
-        )
-
+    for item in diagnosis["actions"]:
+        st.info(item)
 
     # ========================================================
     # TITLE CHECK
     # ========================================================
 
-    st.divider()
+    st.subheader("📝 Title Quick Check")
 
-    st.header(
-        "📝 Title Check"
-    )
+    if len(title) > 65:
 
-    st.write(
-        f"**{video['title']}**"
-    )
+        st.warning(title_check)
 
-    st.metric(
-        "Title Score",
-        f"{title_analysis['score']}/100",
-    )
+    elif len(title) < 25:
 
-    for check in title_analysis["checks"]:
-
-        if check.startswith("🟢"):
-
-            st.success(check)
-
-        else:
-
-            st.warning(check)
-
-
-    # ========================================================
-    # THUMBNAIL CHECK
-    # ========================================================
-
-    st.divider()
-
-    st.header(
-        "🖼️ Thumbnail Check"
-    )
-
-    if is_short:
-
-        st.info(
-            "For Shorts, traditional CTR and thumbnail diagnosis "
-            "should not be treated exactly like long-form videos."
-        )
-
-
-    if video["thumbnail"]:
-
-        st.success(
-            "🟢 Thumbnail successfully retrieved."
-        )
-
-        st.info(
-            "The diagnostic system uses performance data to "
-            "determine whether packaging is likely worth investigating."
-        )
+        st.info(title_check)
 
     else:
 
-        st.error(
-            "❌ Thumbnail could not be retrieved."
-        )
-
-
-    # ========================================================
-    # ACTION PLAN
-    # ========================================================
-
-    st.divider()
-
-    st.header(
-        "🎯 What I Would Do"
-    )
-
-
-    if bottleneck["type"] == "packaging":
-
-        st.markdown(
-            """
-            ### 🥇 Improve the thumbnail/title
-
-            Your CTR is the biggest weakness.
-
-            ### 🥈 Keep the actual video concept
-
-            Your retention suggests people who click are reasonably interested.
-
-            ### 🥉 Test one packaging change at a time
-
-            Don't change five things simultaneously.
-            """
-        )
-
-
-    elif bottleneck["type"] == "retention":
-
-        st.markdown(
-            """
-            ### 🥇 Fix the opening
-
-            Get to the main premise faster.
-
-            ### 🥈 Improve pacing
-
-            Remove unnecessary sections and dead time.
-
-            ### 🥉 Don't immediately change the thumbnail
-
-            If people are clicking, the packaging may already be doing its job.
-            """
-        )
-
-
-    elif bottleneck["type"] == "distribution":
-
-        st.markdown(
-            """
-            ### 🥇 Don't panic
-
-            Low distribution does not automatically mean the video is bad.
-
-            ### 🥈 Watch the trend
-
-            Keep monitoring impressions and views.
-
-            ### 🥉 Study the topic
-
-            Compare the subject against your strongest uploads.
-            """
-        )
-
-
-    elif bottleneck["type"] == "both":
-
-        st.markdown(
-            """
-            ### 🥇 Fix packaging
-
-            Get more people interested in clicking.
-
-            ### 🥈 Fix the opening
-
-            Once they click, make sure the video immediately delivers.
-
-            ### 🥉 Don't change everything at once
-
-            Improve the biggest problem first.
-            """
-        )
-
-
-    elif bottleneck["type"] == "data":
-
-        st.markdown(
-            """
-            ### 🥇 Wait
-
-            There isn't enough data yet.
-
-            ### 🥈 Monitor the next few hours
-
-            Watch impressions, views, and retention.
-
-            ### 🥉 Don't panic-change anything
-
-            Early numbers can be misleading.
-            """
-        )
-
-
-    else:
-
-        st.markdown(
-            """
-            ### 🥇 Keep monitoring
-
-            There isn't one catastrophic problem.
-
-            ### 🥈 Study your winners
-
-            Compare this upload with your strongest videos.
-
-            ### 🥉 Test one variable
-
-            Keep experimenting without destroying what already works.
-            """
-        )
-
-
-    # ========================================================
-    # WHAT NOT TO CHANGE
-    # ========================================================
-
-    st.divider()
-
-    st.header(
-        "🚫 What I Would NOT Change"
-    )
-
-    if bottleneck["type"] == "retention":
-
-        st.success(
-            "🖼️ Don't immediately replace the thumbnail. "
-            "Your viewers are clicking."
-        )
-
-    elif bottleneck["type"] == "packaging":
-
-        st.success(
-            "🎬 Don't immediately rewrite the entire video. "
-            "The content appears capable of holding viewers."
-        )
-
-    elif bottleneck["type"] == "distribution":
-
-        st.success(
-            "🖼️ Don't automatically blame the thumbnail. "
-            "Your CTR is relatively healthy."
-        )
-
-    elif bottleneck["type"] == "data":
-
-        st.info(
-            "⏳ Don't make major changes yet."
-        )
-
-    else:
-
-        st.success(
-            "⚖️ Don't change everything at once."
-        )
-
+        st.success(title_check)
 
     # ========================================================
     # RECENT UPLOADS
     # ========================================================
 
-    if other_videos:
+    if channel_id:
 
         st.divider()
 
-        st.header(
-            "🏆 Recent Uploads"
-        )
+        st.subheader("🆕 Recent Uploads")
 
-        for item in other_videos[:10]:
+        try:
 
-            item_date = item[
-                "published_at"
-            ][:10]
-
-            duration = format_duration(
-                item["duration_seconds"]
+            recent = fetch_recent_uploads(
+                channel_id
             )
 
-            st.write(
-                f"**{item['title']}**  \n"
-                f"👁️ {item['views']:,} views • "
-                f"⏱️ {duration} • "
-                f"📅 {item_date}"
-            )
+            if recent:
 
+                for item in recent:
+
+                    published_date = item["published"]
+
+                    try:
+
+                        dt = datetime.fromisoformat(
+                            published_date.replace(
+                                "Z",
+                                "+00:00"
+                            )
+                        )
+
+                        date_text = dt.strftime(
+                            "%Y-%m-%d"
+                        )
+
+                    except Exception:
+
+                        date_text = ""
+
+                    st.write(
+                        f"• **{item['title']}**"
+                        f" — {date_text}"
+                    )
+
+        except Exception:
+
+            st.info(
+                "Recent uploads couldn't be loaded."
+            )
 
     # ========================================================
-    # HOW IT WORKS
+    # DISCLAIMER
     # ========================================================
 
     st.divider()
 
-    with st.expander(
-        "ℹ️ How this works"
-    ):
-
-        st.write(
-            """
-            **Automatically retrieved from YouTube:**
-
-            • Video title
-            • Thumbnail
-            • Views
-            • Likes
-            • Comments
-            • Video duration
-            • Publication date
-            • How long the video has been live
-            • Recent public uploads
-            • Comparable Shorts performance
-
-            **Entered from YouTube Studio:**
-
-            • CTR
-            • Impressions
-            • Average percentage viewed
-
-            Private YouTube Studio analytics require authenticated
-            access to the channel, so the app does not pretend that
-            a public video URL can provide those private metrics.
-            """
-        )
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-
-st.caption(
-    "YouTube Video Doctor • Performance recommendations are "
-    "diagnostic estimates, not official YouTube ranking rules."
-)
+    st.caption(
+        "Diagnostic scores are heuristic estimates, not official "
+        "YouTube benchmarks. CTR and retention vary substantially "
+        "by topic, audience, traffic source, video length, and distribution."
+    )
