@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from googleapiclient.discovery import build
 
-API_KEY = "AIzaSyBvt18YFvwOzATuC_-N1sDfhzixnKOQfJk"
+API_KEY = "AIzaSyCrH_EOswa6DgOh2taq0aGo_gsUtdpT3TE"
 
 st.title("YouTube Video & Thumbnail Diagnostic")
 
@@ -18,7 +18,7 @@ with col_input3:
     user_retention = st.number_input("Enter Retention (%):", min_value=0.0, max_value=100.0, value=0.0, step=0.1)
 
 def extract_video_id(url):
-    regex = r"(?:v=|\/)([0-9A-Za-z_-]{11})"
+    regex = r"(?:v=|\/|be\/)([0-9A-Za-z_-]{11})"
     match = re.search(regex, url)
     return match.group(1) if match else None
 
@@ -26,7 +26,7 @@ if video_url:
     video_id = extract_video_id(video_url)
     if video_id:
         youtube = build('youtube', 'v3', developerKey=API_KEY)
-        request = youtube.videos().list(part="snippet,statistics", id=video_id)
+      request = youtube.videos().list(part="snippet,statistics", id=video_id)
         response = request.execute()
         
         if response['items']:
@@ -40,13 +40,13 @@ if video_url:
             likes = int(item['statistics'].get('likeCount', 0))
             
             # Additional fetch for channel subscriber count
-            channel_request = youtube.channels().list(part="statistics", id=channel_id)
+      channel_request = youtube.channels().list(part="statistics", id=channel_id)
             channel_response = channel_request.execute()
             sub_count = 0
             if channel_response['items']:
                 sub_count = int(channel_response['items'][0]['statistics'].get('subscriberCount', 0))
 
-            pub_date = datetime.fromisoformat(published_at_str.replace('Z', '+00:00'))
+           pub_date = datetime.fromisoformat(published_at_str.rstrip('Z'))
             days_old = (datetime.now(timezone.utc) - pub_date).days
             days_text = "Today" if days_old == 0 else f"{days_old} days ago"
 
