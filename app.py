@@ -1,12 +1,12 @@
 import re
-from datetime import datetime, timezone
+import statistics
 
 import streamlit as st
 from googleapiclient.discovery import build
 
 
 # ============================================================
-# CONFIG
+# PAGE
 # ============================================================
 
 st.set_page_config(
@@ -15,26 +15,29 @@ st.set_page_config(
     layout="wide",
 )
 
+st.title("📊 YouTube Video Diagnostic")
+st.caption(
+    "Paste a video, enter the three YouTube Studio numbers, "
+    "and get a diagnosis without filling out a giant form."
+)
+
+
+# ============================================================
+# API
+# ============================================================
+
 YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY", "")
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def extract_video_id(url: str):
-    patterns = [
-        r"(?:v=|youtu\.be/|youtube\.com/shorts/)([A-Za-z0-9_-]{11})",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, url or "")
-        if match:
-            return match.group(1)
-
-    return None
+if not YOUTUBE_API_KEY:
+    st.error("❌ YOUTUBE_API_KEY is missing from Streamlit Secrets.")
+    st.code(
+        'YOUTUBE_API_KEY = "your_youtube_api_key_here"',
+        language="toml"
+    )
+    st.stop()
 
 
+@st.cache_resource
 def youtube_client():
     return build(
         "youtube",
@@ -43,7 +46,37 @@ def youtube_client():
     )
 
 
-def get_video(video_id: str):
+# ============================================================
+# VIDEO ID
+# ============================================================
+
+def extract_video_id(url):
+
+    patterns = [
+        r"(?:v=|youtu\.be/|youtube\.com/shorts/)"
+        r"([A-Za-z0-9_-]{11})"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            url or ""
+        )
+
+        if match:
+            return match.group(1)
+
+    return None
+
+
+# ============================================================
+# GET VIDEO
+# ============================================================
+
+@st.cache_data(ttl=600)
+def get_video(video_id):
+
     yt = youtube_client()
 
     response = yt.videos().list(
@@ -68,100 +101,175 @@ def get_video(video_id: str):
     )
 
     return {
-        "id": video_id,
-        "title": snippet.get("title", "Unknown title"),
-        "channel_title": snippet.get(
-            "channelTitle",
-            "Unknown channel"
-        ),
-        "channel_id": snippet.get(
-            "channelId",
-            ""
-        ),
-        "published_at": snippet.get(
-            "publishedAt",
-            ""
-        ),
-        "thumbnail": (
+
+        "id":
+            video_id,
+
+        "title":
+            snippet.get(
+                "title",
+                "Unknown title"
+            ),
+
+        "channel_title":
+            snippet.get(
+                "channelTitle",
+                "Unknown channel"
+            ),
+
+        "channel_id":
+            snippet.get(
+                "channelId",
+                ""
+            ),
+
+        "published_at":
+            snippet.get(
+                "publishedAt",
+                ""
+            ),
+
+        "thumbnail":
             thumbnail["url"]
             if thumbnail
-            else None
-        ),
-        "views": int(
-            stats.get(
-                "viewCount",
-                0
-            )
-        ),
-        "likes": int(
-            stats.get(
-                "likeCount",
-                0
-            )
-        ),
-        "comments": int(
-            stats.get(
-                "commentCount",
-                0
-            )
-        ),
+            else None,
+
+        "views":
+            int(
+                stats.get(
+                    "viewCount",
+                    0
+                )
+            ),
+
+        "likes":
+            int(
+                stats.get(
+                    "likeCount",
+                    0
+                )
+            ),
+
+        "comments":
+            int(
+                stats.get(
+                    "commentCount",
+                    0
+                )
+            ),
     }
 
 
-def get_recent_uploads(
-    channel_id: str,
-    limit: int = 5
+# ============================================================
+# RECENT CHANNEL VIDEOS
+# ============================================================
+
+@st.cache_data(ttl=600)
+def get_recent_videos(
+    channel_id,
+    limit=10
 ):
+
     yt = youtube_client()
 
-    channel_response = yt.channels().list(
-        part="contentDetails,statistics",
+    response = yt.channels().list(
+        part="contentDetails",
         id=channel_id
     ).execute()
 
-    if not channel_response.get("items"):
+    if not response.get("items"):
         return []
 
-    channel = channel_response["items"][0]
-
-    uploads_id = (
-        channel["contentDetails"]
+    uploads = (
+        response["items"][0]
+        ["contentDetails"]
         ["relatedPlaylists"]
         ["uploads"]
     )
 
-    response = yt.playlistItems().list(
-        part="snippet,contentDetails",
-        playlistId=uploads_id,
+    playlist = yt.playlistItems().list(
+        part="contentDetails,snippet",
+        playlistId=uploads,
         maxResults=limit
+    ).execute()
+
+    ids = [
+
+        item["contentDetails"].get(
+            "videoId"
+        )
+
+        for item in playlist.get(
+            "items",
+            []
+        )
+
+        if item["contentDetails"].get(
+            "videoId"
+        )
+    ]
+
+    if not ids:
+        return []
+
+    details = yt.videos().list(
+        part="snippet,statistics,contentDetails",
+        id=",".join(ids)
     ).execute()
 
     videos = []
 
-    for item in response.get(
+    for item in details.get(
         "items",
         []
     ):
 
-        video_id = (
-            item["contentDetails"]
-            .get("videoId")
+        stats = item.get(
+            "statistics",
+            {}
         )
 
-        if not video_id:
-            continue
+        videos.append({
 
-        try:
+            "id":
+                item["id"],
 
-            video = get_video(
-                video_id
-            )
+            "title":
+                item["snippet"].get(
+                    "title",
+                    ""
+                ),
 
-            if video:
-                videos.append(video)
+            "views":
+                int(
+                    stats.get(
+                        "viewCount",
+                        0
+                    )
+                ),
 
-        except Exception:
-            continue
+            "likes":
+                int(
+                    stats.get(
+                        "likeCount",
+                        0
+                    )
+                ),
+
+            "comments":
+                int(
+                    stats.get(
+                        "commentCount",
+                        0
+                    )
+                ),
+
+            "published_at":
+                item["snippet"].get(
+                    "publishedAt",
+                    ""
+                ),
+        })
 
     return videos
 
@@ -177,7 +285,7 @@ def engagement_rate(
 ):
 
     if views <= 0:
-        return 0.0
+        return 0
 
     return (
         (likes + comments)
@@ -185,7 +293,168 @@ def engagement_rate(
     ) * 100
 
 
-def engagement_diagnosis(
+# ============================================================
+# CTR DIAGNOSIS
+# ============================================================
+
+def ctr_status(
+    ctr,
+    impressions
+):
+
+    if impressions < 500:
+
+        if ctr >= 8:
+            return (
+                "🟢",
+                "Promising, but the sample is tiny."
+            )
+
+        if ctr >= 5:
+            return (
+                "🟡",
+                "Reasonable early CTR; "
+                "wait for more impressions."
+            )
+
+        return (
+            "🔴",
+            "Low early CTR, but there isn't "
+            "enough data to panic."
+        )
+
+
+    if impressions < 2000:
+
+        if ctr >= 8:
+            return (
+                "🟢",
+                "Strong CTR for an early test."
+            )
+
+        if ctr >= 5:
+            return (
+                "🟡",
+                "Decent CTR with more data "
+                "still needed."
+            )
+
+        return (
+            "🔴",
+            "Packaging may be limiting clicks."
+        )
+
+
+    if impressions < 100000:
+
+        if ctr >= 8:
+            return (
+                "🟢",
+                "Excellent CTR at this "
+                "distribution level."
+            )
+
+        if ctr >= 6:
+            return (
+                "🟢",
+                "Strong CTR."
+            )
+
+        if ctr >= 4:
+            return (
+                "🟡",
+                "Average CTR; packaging "
+                "has room to improve."
+            )
+
+        return (
+            "🔴",
+            "Low CTR; packaging is "
+            "probably a bottleneck."
+        )
+
+
+    if ctr >= 6:
+
+        return (
+            "🟢",
+            "Very strong CTR despite "
+            "broad distribution."
+        )
+
+    if ctr >= 4:
+
+        return (
+            "🟡",
+            "Healthy CTR for a heavily "
+            "distributed video."
+        )
+
+    if ctr >= 2.5:
+
+        return (
+            "🟡",
+            "Understandable at this scale, "
+            "but packaging may improve."
+        )
+
+    return (
+        "🔴",
+        "Weak CTR even after accounting "
+        "for broad distribution."
+    )
+
+
+# ============================================================
+# RETENTION DIAGNOSIS
+# ============================================================
+
+def retention_status(
+    retention
+):
+
+    if retention >= 55:
+
+        return (
+            "🟢",
+            "Excellent retention."
+        )
+
+    if retention >= 45:
+
+        return (
+            "🟢",
+            "Strong retention."
+        )
+
+    if retention >= 40:
+
+        return (
+            "🟡",
+            "Solid retention with room "
+            "to improve."
+        )
+
+    if retention >= 30:
+
+        return (
+            "🟠",
+            "Retention is becoming a "
+            "meaningful weakness."
+        )
+
+    return (
+        "🔴",
+        "Low retention; viewer drop-off "
+        "is likely a major problem."
+    )
+
+
+# ============================================================
+# ENGAGEMENT DIAGNOSIS
+# ============================================================
+
+def engagement_status(
     rate
 ):
 
@@ -217,166 +486,84 @@ def engagement_diagnosis(
 
 
 # ============================================================
-# CTR DIAGNOSIS
+# CHANNEL COMPARISON
 # ============================================================
 
-def ctr_diagnosis(
-    ctr,
-    impressions
+def channel_comparison(
+    views,
+    recent
 ):
 
-    if impressions < 500:
+    if not recent:
+        return None
 
-        if ctr >= 8:
+    values = [
 
-            return (
-                "🟢",
-                "Promising CTR, but the sample "
-                "is too small for a strong conclusion."
-            )
+        video["views"]
 
-        if ctr >= 5:
+        for video in recent
 
-            return (
-                "🟡",
-                "Reasonable early CTR. Wait for "
-                "more impressions before judging "
-                "the packaging."
-            )
+        if video["views"] >= 0
+    ]
 
-        return (
-            "🔴",
-            "Low early CTR, but the sample is "
-            "too small to panic over."
-        )
+    if len(values) < 2:
+        return None
 
-    if impressions < 2000:
-
-        if ctr >= 8:
-
-            return (
-                "🟢",
-                "Strong CTR for a small "
-                "distribution sample."
-            )
-
-        if ctr >= 5:
-
-            return (
-                "🟡",
-                "Decent CTR, with more data needed."
-            )
-
-        return (
-            "🔴",
-            "Packaging may be limiting clicks."
-        )
-
-    if impressions < 100000:
-
-        if ctr >= 8:
-
-            return (
-                "🟢",
-                "Excellent CTR at this level "
-                "of distribution."
-            )
-
-        if ctr >= 6:
-
-            return (
-                "🟢",
-                "Strong CTR."
-            )
-
-        if ctr >= 4:
-
-            return (
-                "🟡",
-                "Average CTR. There is room "
-                "to improve the title/thumbnail."
-            )
-
-        return (
-            "🔴",
-            "Low CTR. Packaging is a "
-            "likely bottleneck."
-        )
-
-    if ctr >= 6:
-
-        return (
-            "🟢",
-            "Very strong CTR despite broad "
-            "distribution."
-        )
-
-    if ctr >= 4:
-
-        return (
-            "🟡",
-            "Healthy CTR for a heavily "
-            "distributed video."
-        )
-
-    if ctr >= 2.5:
-
-        return (
-            "🟡",
-            "Understandable CTR at large scale, "
-            "but packaging may still improve."
-        )
-
-    return (
-        "🔴",
-        "Weak CTR even considering the "
-        "large amount of distribution."
+    average = statistics.mean(
+        values
     )
 
-
-# ============================================================
-# RETENTION DIAGNOSIS
-# ============================================================
-
-def retention_diagnosis(
-    retention
-):
-
-    if retention >= 55:
-
-        return (
-            "🟢",
-            "Excellent retention."
-        )
-
-    if retention >= 45:
-
-        return (
-            "🟢",
-            "Strong retention."
-        )
-
-    if retention >= 40:
-
-        return (
-            "🟡",
-            "Solid retention with some "
-            "room for improvement."
-        )
-
-    if retention >= 30:
-
-        return (
-            "🟠",
-            "Retention is becoming a "
-            "meaningful weakness."
-        )
-
-    return (
-        "🔴",
-        "Low retention. Viewer drop-off "
-        "is likely a major issue."
+    median = statistics.median(
+        values
     )
+
+    if average <= 0:
+        return None
+
+    ratio = views / average
+
+    if ratio >= 1.5:
+
+        label = (
+            "🔥 Well above your recent "
+            "channel average"
+        )
+
+    elif ratio >= 1.0:
+
+        label = (
+            "🟢 Above your recent "
+            "channel average"
+        )
+
+    elif ratio >= 0.75:
+
+        label = (
+            "🟡 Slightly below your recent "
+            "channel average"
+        )
+
+    else:
+
+        label = (
+            "🔴 Significantly below your "
+            "recent channel average"
+        )
+
+    return {
+
+        "average":
+            average,
+
+        "median":
+            median,
+
+        "ratio":
+            ratio,
+
+        "label":
+            label,
+    }
 
 
 # ============================================================
@@ -384,28 +571,22 @@ def retention_diagnosis(
 # ============================================================
 
 def diagnose(
+
     ctr,
+
     impressions,
+
     retention,
+
     views,
+
     likes,
-    comments
+
+    comments,
+
+    comparison
+
 ):
-
-    score = 100
-
-    problems = []
-    strengths = []
-    actions = []
-
-    ctr_status, ctr_text = ctr_diagnosis(
-        ctr,
-        impressions
-    )
-
-    ret_status, ret_text = retention_diagnosis(
-        retention
-    )
 
     engagement = engagement_rate(
         views,
@@ -413,21 +594,41 @@ def diagnose(
         comments
     )
 
-    eng_status, eng_text = engagement_diagnosis(
-        engagement
+    ctr_icon, ctr_text = ctr_status(
+        ctr,
+        impressions
     )
 
-    # --------------------------------------------------------
-    # CTR
-    # --------------------------------------------------------
+    retention_icon, retention_text = (
+        retention_status(
+            retention
+        )
+    )
 
-    if ctr_status == "🟢":
+    engagement_icon, engagement_text = (
+        engagement_status(
+            engagement
+        )
+    )
+
+    score = 100
+
+    strengths = []
+    problems = []
+    actions = []
+
+
+    # ========================================================
+    # CTR
+    # ========================================================
+
+    if ctr_icon == "🟢":
 
         strengths.append(
             "🖼️ Packaging / click appeal"
         )
 
-    elif ctr_status == "🟡":
+    elif ctr_icon == "🟡":
 
         score -= 7
 
@@ -439,32 +640,35 @@ def diagnose(
             "🖼️ Packaging / click appeal"
         )
 
-        actions.append(
-            (
-                1,
-                "Improve the thumbnail and title",
-                "Use one obvious focal point, stronger "
-                "contrast, less clutter, and a title/"
-                "thumbnail combination that creates "
-                "curiosity without confusion."
-            )
-        )
+        actions.append((
 
-    # --------------------------------------------------------
+            1,
+
+            "Improve the thumbnail/title",
+
+            "Your biggest click-side opportunity "
+            "is packaging. Make the main idea obvious, "
+            "reduce clutter, and create a stronger "
+            "reason to click."
+
+        ))
+
+
+    # ========================================================
     # RETENTION
-    # --------------------------------------------------------
+    # ========================================================
 
-    if ret_status == "🟢":
+    if retention_icon == "🟢":
 
         strengths.append(
             "🎬 Viewer retention"
         )
 
-    elif ret_status == "🟡":
+    elif retention_icon == "🟡":
 
         score -= 5
 
-    elif ret_status == "🟠":
+    elif retention_icon == "🟠":
 
         score -= 15
 
@@ -472,16 +676,17 @@ def diagnose(
             "🎬 Viewer retention"
         )
 
-        actions.append(
-            (
-                1,
-                "Tighten the video",
-                "Get to the premise faster, remove "
-                "dead time, improve pacing, and make "
-                "sure the opening immediately delivers "
-                "the promise of the title and thumbnail."
-            )
-        )
+        actions.append((
+
+            1,
+
+            "Tighten the video",
+
+            "Get to the premise faster, "
+            "remove dead sections, "
+            "and improve pacing."
+
+        ))
 
     else:
 
@@ -491,28 +696,31 @@ def diagnose(
             "🎬 Viewer retention"
         )
 
-        actions.append(
-            (
-                1,
-                "Fix the opening and pacing",
-                "The biggest opportunity is keeping "
-                "viewers after they click. Cut slow "
-                "sections and deliver the main premise "
-                "earlier."
-            )
-        )
+        actions.append((
 
-    # --------------------------------------------------------
+            1,
+
+            "Fix the opening and pacing",
+
+            "The main problem appears to happen "
+            "after the click. Deliver the title/"
+            "thumbnail promise faster and remove "
+            "slow sections."
+
+        ))
+
+
+    # ========================================================
     # ENGAGEMENT
-    # --------------------------------------------------------
+    # ========================================================
 
-    if eng_status == "🟢":
+    if engagement_icon == "🟢":
 
         strengths.append(
             "💬 Engagement"
         )
 
-    elif eng_status == "🟡":
+    elif engagement_icon == "🟡":
 
         score -= 3
 
@@ -524,31 +732,34 @@ def diagnose(
             "💬 Engagement"
         )
 
-        actions.append(
-            (
-                2,
-                "Increase natural viewer interaction",
-                "Give viewers something worth reacting "
-                "to: a question, prediction, controversial "
-                "choice, challenge, or clear moment to discuss."
-            )
-        )
+        actions.append((
+
+            2,
+
+            "Give viewers something to react to",
+
+            "Use a natural question, prediction, "
+            "challenge, or controversial choice."
+
+        ))
+
 
     # ========================================================
-    # CROSS-METRIC ANALYSIS
+    # CROSS-METRIC DIAGNOSIS
     # ========================================================
 
     if ctr >= 7 and retention < 35:
 
         headline = (
-            "🚨 People are clicking, but the video "
-            "isn't keeping enough of them."
+            "🚨 People are clicking, but the "
+            "video isn't keeping enough of them."
         )
 
         priority = (
-            "Fix the opening, pacing, and payoff "
-            "before changing the thumbnail."
+            "Fix the opening and pacing before "
+            "touching the thumbnail."
         )
+
 
     elif ctr < 4.5 and retention >= 40:
 
@@ -563,27 +774,32 @@ def diagnose(
             "rebuilding the video."
         )
 
+
     elif ctr >= 7 and retention >= 40:
 
         headline = (
-            "🔥 Both packaging and retention look healthy."
+            "🔥 Both packaging and retention "
+            "look healthy."
         )
 
         priority = (
-            "Avoid drastic changes. Let distribution develop."
+            "Don't make drastic changes. "
+            "Let distribution develop."
         )
+
 
     elif ctr < 4.5 and retention < 35:
 
         headline = (
-            "🚨 Both packaging and viewer retention "
-            "need attention."
+            "🚨 Both packaging and viewer "
+            "retention need attention."
         )
 
         priority = (
             "Improve the thumbnail/title first, "
-            "then improve the opening and pacing."
+            "then tighten the opening."
         )
+
 
     else:
 
@@ -593,52 +809,87 @@ def diagnose(
         )
 
         priority = (
-            "Fix the weakest metric first instead "
-            "of changing everything."
+            "Fix the weakest metric first "
+            "instead of changing everything."
         )
+
 
     # ========================================================
-    # DON'T CHANGE THINGS UNNECESSARILY
+    # CHANNEL COMPARISON
     # ========================================================
 
-    if (
-        ctr_status == "🟢"
-        and not any(
-            "Packaging" in p
-            for p in problems
-        )
-    ):
+    if comparison:
 
-        actions.append(
-            (
-                99,
-                "Don't blindly replace the thumbnail",
-                "CTR isn't showing an obvious packaging "
-                "crisis. A drastic thumbnail change could hurt."
+        ratio = comparison["ratio"]
+
+        if ratio >= 1.5:
+
+            strengths.append(
+                "📈 Views are substantially above "
+                "your recent channel average"
             )
-        )
 
-    if ret_status == "🟢":
+        elif ratio < 0.75:
 
-        actions.append(
-            (
-                99,
-                "Don't completely rebuild the video",
-                "Retention isn't showing an obvious "
-                "viewer-experience crisis."
+            problems.append(
+                "📉 Views are substantially below "
+                "your recent channel average"
             )
-        )
+
+
+    # ========================================================
+    # SMALL SAMPLE
+    # ========================================================
 
     if impressions < 2000:
 
-        actions.append(
-            (
-                3,
-                "Treat the result as preliminary",
-                "There are not many impressions yet. "
-                "Avoid making major decisions from CTR alone."
-            )
-        )
+        actions.append((
+
+            3,
+
+            "Treat this as preliminary",
+
+            "There aren't many impressions yet. "
+            "Don't make a major decision from CTR alone."
+
+        ))
+
+
+    # ========================================================
+    # DON'T MESS WITH HEALTHY THINGS
+    # ========================================================
+
+    if ctr_icon == "🟢":
+
+        actions.append((
+
+            99,
+
+            "Don't blindly replace the thumbnail",
+
+            "CTR isn't showing an obvious "
+            "packaging crisis."
+
+        ))
+
+
+    if retention_icon == "🟢":
+
+        actions.append((
+
+            99,
+
+            "Don't completely rebuild the video",
+
+            "Retention isn't showing an obvious "
+            "viewer-experience crisis."
+
+        ))
+
+
+    # ========================================================
+    # SCORE
+    # ========================================================
 
     score = max(
         0,
@@ -647,6 +898,7 @@ def diagnose(
             score
         )
     )
+
 
     if score >= 90:
 
@@ -668,59 +920,54 @@ def diagnose(
 
         rating = "🔴 Weak"
 
+
     return {
-        "score": score,
-        "rating": rating,
-        "headline": headline,
-        "priority": priority,
-        "ctr_status": ctr_status,
-        "ctr_text": ctr_text,
-        "ret_status": ret_status,
-        "ret_text": ret_text,
-        "eng_status": eng_status,
-        "eng_text": eng_text,
-        "engagement": engagement,
-        "problems": problems,
-        "strengths": strengths,
-        "actions": sorted(
-            actions,
-            key=lambda x: x[0]
-        ),
+
+        "score":
+            score,
+
+        "rating":
+            rating,
+
+        "headline":
+            headline,
+
+        "priority":
+            priority,
+
+        "ctr_status":
+            ctr_icon,
+
+        "ctr_text":
+            ctr_text,
+
+        "ret_status":
+            retention_icon,
+
+        "ret_text":
+            retention_text,
+
+        "eng_status":
+            engagement_icon,
+
+        "eng_text":
+            engagement_text,
+
+        "engagement":
+            engagement,
+
+        "strengths":
+            strengths,
+
+        "problems":
+            problems,
+
+        "actions":
+            sorted(
+                actions,
+                key=lambda x: x[0]
+            ),
     }
-
-
-# ============================================================
-# APP
-# ============================================================
-
-st.title(
-    "📊 YouTube Video Diagnostic"
-)
-
-st.write(
-    "Enter your YouTube Studio numbers and this app "
-    "will diagnose the likely bottleneck: packaging, "
-    "retention, engagement, or simply lack of data."
-)
-
-
-# ============================================================
-# API KEY CHECK
-# ============================================================
-
-if not YOUTUBE_API_KEY:
-
-    st.error(
-        "❌ YOUTUBE_API_KEY is missing from "
-        "Streamlit Secrets."
-    )
-
-    st.code(
-        'YOUTUBE_API_KEY = "your_youtube_api_key_here"',
-        language="toml"
-    )
-
-    st.stop()
 
 
 # ============================================================
@@ -728,14 +975,17 @@ if not YOUTUBE_API_KEY:
 # ============================================================
 
 video_url = st.text_input(
-    "🎬 YouTube video URL",
+
+    "🎬 Paste your YouTube video URL",
+
     placeholder=
     "https://www.youtube.com/watch?v=..."
+
 )
 
 
 st.subheader(
-    "📈 YouTube Studio Metrics"
+    "📊 Three numbers from YouTube Studio"
 )
 
 
@@ -745,66 +995,97 @@ c1, c2, c3 = st.columns(3)
 with c1:
 
     ctr = st.number_input(
+
         "CTR (%)",
+
         min_value=0.0,
+
         max_value=100.0,
+
         value=0.0,
+
         step=0.1
+
     )
 
 
 with c2:
 
     impressions = st.number_input(
+
         "Impressions",
+
         min_value=0,
+
         value=0,
+
         step=100
+
     )
 
 
 with c3:
 
     retention = st.number_input(
-        "Average Percentage Viewed (%)",
+
+        "Average percentage viewed (%)",
+
         min_value=0.0,
+
         max_value=100.0,
+
         value=0.0,
+
         step=0.1
+
     )
 
 
 # ============================================================
-# ANALYZE
+# ANALYZE BUTTON
 # ============================================================
 
 if st.button(
-    "🚀 Analyze Video",
+
+    "🚀 Analyze",
+
     type="primary",
+
     use_container_width=True
+
 ):
 
     video_id = extract_video_id(
         video_url
     )
 
+
     if not video_id:
 
         st.error(
-            "❌ I couldn't recognize that YouTube URL."
+            "❌ Paste a valid YouTube video URL."
         )
 
         st.stop()
 
 
     with st.spinner(
-        "Loading YouTube data..."
+        "Analyzing your video..."
     ):
 
         try:
 
             video = get_video(
                 video_id
+            )
+
+            recent = (
+                get_recent_videos(
+                    video["channel_id"],
+                    limit=10
+                )
+                if video
+                else []
             )
 
         except Exception as exc:
@@ -825,18 +1106,49 @@ if st.button(
         st.stop()
 
 
+    # Remove current video from comparison.
+
+    recent_without_current = [
+
+        v
+
+        for v in recent
+
+        if v["id"] != video_id
+
+    ]
+
+
+    comparison = channel_comparison(
+
+        video["views"],
+
+        recent_without_current
+
+    )
+
+
     result = diagnose(
+
         ctr=ctr,
+
         impressions=impressions,
+
         retention=retention,
+
         views=video["views"],
+
         likes=video["likes"],
-        comments=video["comments"]
+
+        comments=video["comments"],
+
+        comparison=comparison
+
     )
 
 
     # ========================================================
-    # VIDEO
+    # VIDEO HEADER
     # ========================================================
 
     st.divider()
@@ -904,13 +1216,13 @@ if st.button(
 
 
     # ========================================================
-    # OVERALL DIAGNOSIS
+    # MAIN DIAGNOSIS
     # ========================================================
 
     st.divider()
 
     st.header(
-        "🧠 Overall Diagnosis"
+        "🧠 Diagnosis"
     )
 
 
@@ -939,46 +1251,117 @@ if st.button(
 
 
     st.info(
-        f"🎯 **Most important:** "
+        f"🎯 **What I'd fix first:** "
         f"{result['priority']}"
     )
 
 
     # ========================================================
-    # METRIC BREAKDOWN
+    # CHANNEL COMPARISON
+    # ========================================================
+
+    if comparison:
+
+        st.divider()
+
+        st.header(
+            "📈 Compared With Your Channel"
+        )
+
+
+        a, b, c = st.columns(3)
+
+
+        a.metric(
+
+            "Recent average views",
+
+            f"{comparison['average']:,.0f}"
+
+        )
+
+
+        b.metric(
+
+            "This video's ratio",
+
+            f"{comparison['ratio']:.2f}×"
+
+        )
+
+
+        c.metric(
+
+            "Recent median views",
+
+            f"{comparison['median']:,.0f}"
+
+        )
+
+
+        if comparison["ratio"] >= 1.5:
+
+            st.success(
+                comparison["label"]
+            )
+
+        elif comparison["ratio"] >= 0.75:
+
+            st.warning(
+                comparison["label"]
+            )
+
+        else:
+
+            st.error(
+                comparison["label"]
+            )
+
+
+    # ========================================================
+    # WHY
     # ========================================================
 
     st.divider()
 
     st.header(
-        "🔬 Metric Breakdown"
+        "🔬 Why"
     )
 
 
     st.write(
+
         f"**🖼️ CTR:** "
         f"{result['ctr_status']} "
         f"{result['ctr_text']}"
+
     )
 
 
     st.write(
+
         f"**🎬 Retention:** "
         f"{result['ret_status']} "
         f"{result['ret_text']}"
+
     )
 
 
     st.write(
+
         f"**💬 Engagement:** "
         f"{result['eng_status']} "
         f"{result['eng_text']}"
+
     )
 
 
     st.metric(
-        "Engagement Rate",
+
+        "Engagement rate",
+
         f"{result['engagement']:.2f}%"
+
     )
 
 
@@ -1011,7 +1394,7 @@ if st.button(
         st.divider()
 
         st.header(
-            "🚨 Biggest Problems"
+            "🚨 What's Hurting"
         )
 
 
@@ -1029,7 +1412,7 @@ if st.button(
     st.divider()
 
     st.header(
-        "🎯 What I'd Change"
+        "🎯 What I'd Do"
     )
 
 
@@ -1047,22 +1430,57 @@ if st.button(
                 f"**{title}**\n\n{text}"
             )
 
-        else:
+        elif priority == 3:
 
             st.info(
                 f"**{title}**\n\n{text}"
             )
 
+        else:
+
+            st.caption(
+                f"**{title}** — {text}"
+            )
+
 
     # ========================================================
-    # FINAL NOTE
+    # RECENT VIDEOS
+    # ========================================================
+
+    if recent_without_current:
+
+        st.divider()
+
+        st.header(
+            "🆕 Your Recent Videos"
+        )
+
+
+        for item in recent_without_current[:5]:
+
+            published = (
+                item["published_at"][:10]
+            )
+
+            st.write(
+
+                f"**{item['title']}** — "
+                f"{item['views']:,} views — "
+                f"{published}"
+
+            )
+
+
+    # ========================================================
+    # FOOTER
     # ========================================================
 
     st.divider()
 
     st.caption(
-        "These are diagnostic heuristics, not official "
-        "YouTube benchmarks. CTR and retention vary "
-        "substantially by topic, audience, traffic source, "
-        "video length, and distribution."
+
+        "This diagnosis uses your video's metrics "
+        "and recent channel performance. It is a "
+        "heuristic, not an official YouTube score."
+
     )
