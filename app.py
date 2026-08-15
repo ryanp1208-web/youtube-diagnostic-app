@@ -46,9 +46,10 @@ if video_url:
             if channel_response['items']:
                 sub_count = int(channel_response['items'][0]['statistics'].get('subscriberCount', 0))
 
-          if published_at_str.endswith('Z'):
-                published_at_str = published_at_str[:-1] + '+00:00'
-            pub_date = datetime.fromisoformat(published_at_str)
+        pub_date_str = published_at_str.replace('Z', '')[:10]
+            pub_date = datetime.fromisoformat(pub_date_str)
+            days_old = (datetime.now().date() - pub_date.date()).days
+            days_text = "Today" if days_old == 0 else f"{days_old} days ago"
             days_old = (datetime.now(timezone.utc) - pub_date).days
             days_text = "Today" if days_old == 0 else f"{days_old} days ago"
 
