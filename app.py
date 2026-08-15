@@ -7,7 +7,7 @@ from googleapiclient.discovery import build
 
 
 # ============================================================
-# PAGE
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -18,7 +18,7 @@ st.set_page_config(
 
 st.title("🩺 YouTube Video Doctor")
 st.caption(
-    "Analyze your video's performance without AI or paid AI APIs."
+    "Analyze your video's performance and find areas for improvement."
 )
 
 
@@ -29,7 +29,7 @@ st.caption(
 YOUTUBE_API_KEY = st.secrets.get("YOUTUBE_API_KEY", "")
 
 if not YOUTUBE_API_KEY:
-    st.error("❌ YOUTUBE_API_KEY is missing from Streamlit Secrets.")
+    st.error("❌ YouTube API key is missing from Streamlit Secrets.")
     st.stop()
 
 
@@ -43,10 +43,11 @@ def youtube_client():
 
 
 # ============================================================
-# URL / ID
+# EXTRACT VIDEO ID
 # ============================================================
 
 def extract_video_id(url):
+
     if not url:
         return None
 
@@ -58,6 +59,7 @@ def extract_video_id(url):
     ]
 
     for pattern in patterns:
+
         match = re.search(pattern, url)
 
         if match:
@@ -67,22 +69,18 @@ def extract_video_id(url):
 
 
 def url_looks_like_short(url):
+
+    if not url:
+        return False
+
     return "/shorts/" in url.lower()
 
 
 # ============================================================
-# DURATION
+# PARSE VIDEO DURATION
 # ============================================================
 
 def parse_iso_duration(duration):
-    """
-    Converts YouTube ISO 8601 duration into seconds.
-
-    Examples:
-    PT45S       = 45 seconds
-    PT5M20S     = 5 minutes 20 seconds
-    PT1H12M     = 1 hour 12 minutes
-    """
 
     if not duration:
         return 0
@@ -133,6 +131,7 @@ def format_duration(seconds):
 def calculate_video_age(published_at):
 
     try:
+
         published = datetime.fromisoformat(
             published_at.replace("Z", "+00:00")
         )
@@ -149,6 +148,7 @@ def calculate_video_age(published_at):
         return seconds
 
     except Exception:
+
         return None
 
 
@@ -171,7 +171,7 @@ def format_age(seconds):
 
 
 # ============================================================
-# SHORT DETECTION
+# VIDEO TYPE
 # ============================================================
 
 def determine_video_type(
@@ -179,8 +179,7 @@ def determine_video_type(
     duration_seconds,
 ):
 
-    # Strongest clue available to this app:
-    # the URL itself is /shorts/
+    # A /shorts/ URL is the strongest signal available here.
     if url_looks_like_short(url):
 
         return {
@@ -189,8 +188,8 @@ def determine_video_type(
             "label": "📱 YouTube Short",
         }
 
-    # Otherwise, videos <= 3 minutes are treated as
-    # Shorts candidates. This is NOT a guaranteed classification.
+    # Videos 3 minutes or shorter are treated as Shorts
+    # candidates.
     if duration_seconds <= 180:
 
         return {
@@ -207,7 +206,7 @@ def determine_video_type(
 
 
 # ============================================================
-# GET VIDEO
+# GET VIDEO INFORMATION
 # ============================================================
 
 @st.cache_data(ttl=300)
@@ -429,7 +428,7 @@ def get_recent_videos(
 
 
 # ============================================================
-# CALCULATIONS
+# ENGAGEMENT
 # ============================================================
 
 def engagement_rate(
@@ -446,6 +445,10 @@ def engagement_rate(
         / views
     ) * 100
 
+
+# ============================================================
+# CHANNEL COMPARISON
+# ============================================================
 
 def calculate_channel_stats(
     current_views,
@@ -468,22 +471,10 @@ def calculate_channel_stats(
     median = statistics.median(values)
     best = max(values)
 
-    sorted_values = sorted(
-        values,
-        reverse=True,
-    )
-
-    top_three = statistics.mean(
-        sorted_values[
-            :min(3, len(sorted_values))
-        ]
-    )
-
     return {
         "average": average,
         "median": median,
         "best": best,
-        "top_three": top_three,
 
         "ratio": (
             current_views / average
@@ -496,7 +487,7 @@ def calculate_channel_stats(
 
 
 # ============================================================
-# SHORTS CHANNEL COMPARISON
+# SHORTS COMPARISON
 # ============================================================
 
 def is_shortish(video):
@@ -530,6 +521,7 @@ def get_short_comparison(
         "count": len(values),
         "average": average,
         "best": best,
+
         "ratio": (
             current_views / average
             if average > 0
@@ -539,7 +531,7 @@ def get_short_comparison(
 
 
 # ============================================================
-# VELOCITY
+# VIEW VELOCITY
 # ============================================================
 
 def calculate_velocity(
@@ -575,7 +567,7 @@ def format_velocity(
 
 
 # ============================================================
-# HEALTH SCORES
+# CTR SCORE
 # ============================================================
 
 def ctr_score(
@@ -611,6 +603,10 @@ def ctr_score(
     return 25
 
 
+# ============================================================
+# RETENTION SCORE
+# ============================================================
+
 def retention_score(
     retention,
 ):
@@ -638,6 +634,10 @@ def retention_score(
 
     return 15
 
+
+# ============================================================
+# IMPRESSIONS SCORE
+# ============================================================
 
 def impressions_score(
     impressions,
@@ -667,6 +667,10 @@ def impressions_score(
     return 30
 
 
+# ============================================================
+# ENGAGEMENT SCORE
+# ============================================================
+
 def engagement_score(
     engagement,
 ):
@@ -688,6 +692,10 @@ def engagement_score(
 
     return 30
 
+
+# ============================================================
+# HEALTH LABEL
+# ============================================================
 
 def health_label(score):
 
@@ -754,7 +762,7 @@ def analyze_title(title):
 
 
 # ============================================================
-# BOTTLENECK
+# BOTTLENECK DIAGNOSIS
 # ============================================================
 
 def determine_bottleneck(
@@ -767,66 +775,79 @@ def determine_bottleneck(
 
     if is_short:
 
-        # Shorts don't rely on the same traditional
-        # thumbnail/CTR model as long-form videos.
-
         if retention < 50:
 
             return {
                 "title": "Retention is the biggest concern",
+
                 "reason": (
-                    "For this Short, viewer retention is more "
-                    "useful than treating traditional CTR as "
-                    "the main diagnosis."
+                    "Viewers may not be staying with the Short "
+                    "long enough."
                 ),
+
                 "action": (
                     "Improve the opening, pacing, payoff, "
                     "and rewatchability."
                 ),
+
                 "type": "retention",
             }
 
-        if channel_stats and channel_stats["ratio"] < 0.6:
+        if (
+            channel_stats
+            and channel_stats["ratio"] < 0.6
+        ):
 
             return {
                 "title": "Shorts distribution is weak",
+
                 "reason": (
-                    "This Short is receiving significantly fewer "
-                    "views than your recent comparable uploads."
+                    "This Short is receiving significantly "
+                    "fewer views than your recent comparable Shorts."
                 ),
+
                 "action": (
                     "Study the topic, opening, pacing, and "
                     "viewer response of your stronger Shorts."
                 ),
+
                 "type": "distribution",
             }
 
         return {
             "title": "Short is showing healthy signals",
+
             "reason": (
                 "There isn't one obvious major weakness "
-                "from the data provided."
+                "from the available data."
             ),
+
             "action": (
                 "Keep monitoring its view velocity."
             ),
+
             "type": "healthy",
         }
 
 
+    # --------------------------------------------------------
     # LONG-FORM
+    # --------------------------------------------------------
 
     if impressions < 500:
 
         return {
             "title": "Not enough data yet",
+
             "reason": (
                 "The video hasn't received enough impressions "
                 "to make a reliable packaging diagnosis."
             ),
+
             "action": (
                 "Wait for more data before making major changes."
             ),
+
             "type": "data",
         }
 
@@ -835,13 +856,16 @@ def determine_bottleneck(
 
         return {
             "title": "Packaging is the main bottleneck",
+
             "reason": (
                 "People who click appear reasonably interested, "
                 "but the click-through rate is weak."
             ),
+
             "action": (
                 "Test the thumbnail/title combination."
             ),
+
             "type": "packaging",
         }
 
@@ -850,12 +874,15 @@ def determine_bottleneck(
 
         return {
             "title": "Retention is the main bottleneck",
+
             "reason": (
                 "People are clicking, but many are leaving."
             ),
+
             "action": (
                 "Improve the opening, pacing, and payoff."
             ),
+
             "type": "retention",
         }
 
@@ -868,14 +895,17 @@ def determine_bottleneck(
 
         return {
             "title": "Distribution is the main bottleneck",
+
             "reason": (
                 "CTR is reasonably healthy, but the video is "
                 "performing well below your recent view average."
             ),
+
             "action": (
                 "Don't immediately blame the thumbnail. "
                 "Monitor impressions and topic performance."
             ),
+
             "type": "distribution",
         }
 
@@ -884,32 +914,38 @@ def determine_bottleneck(
 
         return {
             "title": "Packaging and retention both need work",
+
             "reason": (
                 "The video is struggling to generate clicks "
                 "and keep viewers."
             ),
+
             "action": (
                 "Improve packaging first, then work on the opening."
             ),
+
             "type": "both",
         }
 
 
     return {
         "title": "Performance is mixed",
+
         "reason": (
             "There isn't one overwhelmingly weak metric."
         ),
+
         "action": (
             "Focus on whichever metric is furthest below "
             "your normal performance."
         ),
+
         "type": "mixed",
     }
 
 
 # ============================================================
-# INPUT
+# VIDEO URL INPUT
 # ============================================================
 
 st.subheader("🎬 Analyze a Video")
@@ -921,7 +957,7 @@ video_url = st.text_input(
 
 
 # ============================================================
-# STUDIO METRICS
+# YOUTUBE STUDIO METRICS
 # ============================================================
 
 st.subheader(
@@ -929,9 +965,8 @@ st.subheader(
 )
 
 st.caption(
-    "These are still entered from YouTube Studio because "
-    "private analytics such as CTR and impressions require "
-    "channel-owner authentication."
+    "Enter these from YouTube Studio. "
+    "They are private channel analytics."
 )
 
 c1, c2, c3 = st.columns(3)
@@ -967,7 +1002,7 @@ with c3:
 
 
 # ============================================================
-# ANALYZE
+# ANALYZE BUTTON
 # ============================================================
 
 if st.button(
@@ -990,7 +1025,7 @@ if st.button(
 
 
     with st.spinner(
-        "Pulling video information..."
+        "Analyzing video..."
     ):
 
         try:
@@ -1038,7 +1073,7 @@ if st.button(
 
 
     # ========================================================
-    # COMPARISON
+    # RECENT VIDEOS
     # ========================================================
 
     other_videos = [
@@ -1047,6 +1082,10 @@ if st.button(
         if v["id"] != video_id
     ]
 
+
+    # ========================================================
+    # CHANNEL COMPARISON
+    # ========================================================
 
     if is_short:
 
@@ -1064,7 +1103,7 @@ if st.button(
 
 
     # ========================================================
-    # AGE / VELOCITY
+    # AGE AND VELOCITY
     # ========================================================
 
     age_seconds = video[
@@ -1089,7 +1128,7 @@ if st.button(
 
 
     # ========================================================
-    # BOTTLENECK
+    # DIAGNOSIS
     # ========================================================
 
     bottleneck = determine_bottleneck(
@@ -1111,7 +1150,7 @@ if st.button(
 
 
     # ========================================================
-    # HEALTH
+    # SCORES
     # ========================================================
 
     c_score = ctr_score(
@@ -1138,12 +1177,16 @@ if st.button(
 
         if ratio >= 1.5:
             channel_score = 100
+
         elif ratio >= 1:
             channel_score = 80
+
         elif ratio >= 0.75:
             channel_score = 65
+
         elif ratio >= 0.5:
             channel_score = 45
+
         else:
             channel_score = 25
 
@@ -1152,8 +1195,9 @@ if st.button(
         channel_score = 50
 
 
-    # For Shorts, reduce the importance of traditional CTR
-    # because this is not a perfect apples-to-apples signal.
+    # ========================================================
+    # HEALTH SCORE
+    # ========================================================
 
     if is_short:
 
@@ -1176,7 +1220,7 @@ if st.button(
 
 
     # ========================================================
-    # HEADER
+    # RESULT HEADER
     # ========================================================
 
     st.divider()
@@ -1191,32 +1235,31 @@ if st.button(
 
 
     # ========================================================
-    # TYPE
+    # VIDEO TYPE
     # ========================================================
 
     if video_type["type"] == "short":
 
         st.success(
-            "📱 **YouTube Short detected from the URL.**"
+            "📱 **YouTube Short detected.**"
         )
 
     elif video_type["type"] == "short_candidate":
 
         st.warning(
             "📱 **Shorts candidate:** this video is 3 minutes "
-            "or shorter. Its exact Shorts classification "
-            "cannot be confirmed from the public API metadata."
+            "or shorter."
         )
 
     else:
 
         st.info(
-            "🎬 **Long-form mode**"
+            "🎬 **Long-form video**"
         )
 
 
     # ========================================================
-    # THUMBNAIL
+    # VIDEO INFORMATION
     # ========================================================
 
     left, right = st.columns(
@@ -1234,10 +1277,6 @@ if st.button(
 
 
     with right:
-
-        # ----------------------------------------------------
-        # AUTOMATIC VIDEO INFORMATION
-        # ----------------------------------------------------
 
         st.subheader(
             "⏱️ Video Information"
@@ -1297,7 +1336,7 @@ if st.button(
 
 
     # ========================================================
-    # METRICS
+    # BASIC PERFORMANCE
     # ========================================================
 
     st.divider()
@@ -1330,7 +1369,7 @@ if st.button(
 
 
     # ========================================================
-    # LONG-FORM / SHORTS METRICS
+    # SHORTS / LONG FORM METRICS
     # ========================================================
 
     if is_short:
@@ -1390,7 +1429,7 @@ if st.button(
 
 
     # ========================================================
-    # HEALTH
+    # VIDEO HEALTH
     # ========================================================
 
     st.divider()
@@ -1472,7 +1511,7 @@ if st.button(
 
 
     # ========================================================
-    # PRIMARY DIAGNOSIS
+    # MAIN DIAGNOSIS
     # ========================================================
 
     st.divider()
@@ -1611,7 +1650,7 @@ if st.button(
 
             st.success(
                 "🟢 **Established:** the video has been live long "
-                "enough for a more meaningful performance comparison."
+                "enough for a more meaningful comparison."
             )
 
 
@@ -1623,7 +1662,7 @@ if st.button(
 
 
     # ========================================================
-    # TITLE
+    # TITLE CHECK
     # ========================================================
 
     st.divider()
@@ -1653,7 +1692,7 @@ if st.button(
 
 
     # ========================================================
-    # THUMBNAIL
+    # THUMBNAIL CHECK
     # ========================================================
 
     st.divider()
@@ -1665,9 +1704,10 @@ if st.button(
     if is_short:
 
         st.info(
-            "For Shorts, don't treat traditional CTR/thumbnail "
-            "diagnosis exactly like long-form videos."
+            "For Shorts, traditional CTR and thumbnail diagnosis "
+            "should not be treated exactly like long-form videos."
         )
+
 
     if video["thumbnail"]:
 
@@ -1676,9 +1716,8 @@ if st.button(
         )
 
         st.info(
-            "The no-AI version does not claim to judge artistic "
-            "quality. It uses your actual performance data to "
-            "decide whether packaging is likely worth investigating."
+            "The diagnostic system uses performance data to "
+            "determine whether packaging is likely worth investigating."
         )
 
     else:
@@ -1747,7 +1786,7 @@ if st.button(
 
             ### 🥈 Watch the trend
 
-            Keep monitoring impressions/views.
+            Keep monitoring impressions and views.
 
             ### 🥉 Study the topic
 
@@ -1814,7 +1853,7 @@ if st.button(
 
 
     # ========================================================
-    # DON'T CHANGE
+    # WHAT NOT TO CHANGE
     # ========================================================
 
     st.divider()
@@ -1858,7 +1897,7 @@ if st.button(
 
 
     # ========================================================
-    # RECENT VIDEOS
+    # RECENT UPLOADS
     # ========================================================
 
     if other_videos:
@@ -1888,7 +1927,7 @@ if st.button(
 
 
     # ========================================================
-    # LIMITATIONS
+    # HOW IT WORKS
     # ========================================================
 
     st.divider()
@@ -1899,7 +1938,7 @@ if st.button(
 
         st.write(
             """
-            **Automatically retrieved:**
+            **Automatically retrieved from YouTube:**
 
             • Video title
             • Thumbnail
@@ -1919,15 +1958,10 @@ if st.button(
             • Average percentage viewed
 
             Private YouTube Studio analytics require authenticated
-            access to the channel, so this app does not pretend that
+            access to the channel, so the app does not pretend that
             a public video URL can provide those private metrics.
             """
         )
-
-
-    st.success(
-        "🩺 Diagnosis complete — no OpenAI or Gemini API required."
-    )
 
 
 # ============================================================
